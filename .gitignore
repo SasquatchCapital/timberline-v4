@@ -21,3 +21,7 @@ broadcast/**/dry-run/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local library symlink & legacy keeper scripts
+lib
+keeper/
