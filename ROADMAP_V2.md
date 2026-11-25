@@ -11,14 +11,14 @@ Target window: **November 25 – December 31, 2026** (aligned with V1 `$TMBR` lo
 - Documented V1 accounting and economic findings in [`POSTMORTEM_V1.md`](./POSTMORTEM_V1.md).
 - Locked down `.gitignore` and initialized public transparency repository.
 
-### [ ] Milestone 1 — `TimberlineHook` v2 (`src/TimberlineHook.sol`)
-- [ ] Replace `block.number` clocks with `block.timestamp` across sniper decay and LVR EMA.
-- [ ] Implement elapsed-time exponential EMA decay (`tau` time constant) and make LVR protection **free/standard** on all pools.
-- [ ] Add creator-selectable base LP swap fee tiers (**`30 bps`**, **`50 bps`**, or **`100 bps`**) with dynamic LVR ceiling (`baseLpFee + 220 bps`) while keeping Timberline's quote-only hook fee fixed at **`15 bps`**.
-- [ ] Upgrade Block-1 anti-snipe presets to **`15%` (60s)**, **`35%` (180s)**, and **`60%` (300s)** (`85%` locked LP / `15%` Treasury).
-- [ ] Enable `beforeAddLiquidity` during `block.timestamp < endSnipeTime` to block Block-1 JIT LP fee siphoning.
-- [ ] Expire `maxBlockQuoteVolume` once `block.timestamp >= endSnipeTime`.
-- [ ] Move `_pendingUnspecifiedHookFeePips` to Cancun transient storage (`tstore`/`tload`) and use `SafeERC20` in `withdrawFees()`.
+### [x] Milestone 1 — `TimberlineHook` v2 (`src/TimberlineHook.sol`)
+- [x] Replace `block.number` clocks with `block.timestamp` across sniper decay and LVR EMA.
+- [x] Implement elapsed-time exponential EMA decay (`tau` time constant) and make LVR protection **free/standard** on all pools.
+- [x] Add creator-selectable base LP swap fee tiers (**`30 bps`**, **`50 bps`**, or **`100 bps`**) with dynamic LVR ceiling (`baseLpFee + 220 bps`) while keeping Timberline's quote-only hook fee fixed at **`15 bps`**.
+- [x] Upgrade Block-1 anti-snipe presets to **`15%` (60s)**, **`35%` (180s)**, and **`60%` (300s)** (`85%` locked LP / `15%` Treasury).
+- [x] Enable `beforeAddLiquidity` during `block.timestamp < endSnipeTime` to block Block-1 JIT LP fee siphoning.
+- [x] Expire `maxBlockQuoteVolume` once `block.timestamp >= endSnipeTime`.
+- [x] Move `_pendingUnspecifiedHookFeePips` to Cancun transient storage (`tstore`/`tload`) and use `SafeERC20` in `withdrawFees()`.
 
 ### [ ] Milestone 2 — `TimberlineTokens` v2 (`src/TimberlineTokens.sol`)
 - [ ] Retain zero-admin `STANDARD`, `BURNABLE`, and `GOVERNANCE` blueprints.
