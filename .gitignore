@@ -1,0 +1,23 @@
+# Secrets & environment variables (NEVER COMMIT)
+.env
+.env.*
+*.pem
+*.key
+*secret*
+*mnemonic*
+
+# Foundry build & cache artifacts
+cache/
+out/
+coverage/
+lcov.info
+
+# Local Anvil & dry-run broadcast logs
+broadcast/*/31337/
+broadcast/**/dry-run/
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
