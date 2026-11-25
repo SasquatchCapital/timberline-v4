@@ -20,11 +20,11 @@ Target window: **November 25 – December 31, 2026** (aligned with V1 `$TMBR` lo
 - [x] Expire `maxBlockQuoteVolume` once `block.timestamp >= endSnipeTime`.
 - [x] Move `_pendingUnspecifiedHookFeePips` to Cancun transient storage (`tstore`/`tload`) and use `SafeERC20` in `withdrawFees()`.
 
-### [ ] Milestone 2 — `TimberlineTokens` v2 (`src/TimberlineTokens.sol`)
-- [ ] Retain zero-admin `STANDARD`, `BURNABLE`, and `GOVERNANCE` blueprints.
-- [ ] Override `ERC20Votes` on `GOVERNANCE` to ERC-6372 `block.timestamp` clock mode.
-- [ ] Add Blueprint #4: **`SUPERCHAIN` (`SuperchainERC20` / ERC-7802)** restricted strictly to Base's canonical `SuperchainTokenBridge` (`0x4200000000000000000000000000000000000028`).
-- [ ] Support deterministic `CREATE2` deployment with caller-scoped salts.
+### [x] Milestone 2 — `TimberlineTokens` v2 (`src/TimberlineTokens.sol`)
+- [x] Retain zero-admin `STANDARD`, `BURNABLE`, and `GOVERNANCE` blueprints.
+- [x] Override `ERC20Votes` on `GOVERNANCE` to ERC-6372 `block.timestamp` clock mode.
+- [x] Add Blueprint #4: **`SUPERCHAIN` (`SuperchainERC20` / ERC-7802)** restricted strictly to Base's canonical `SuperchainTokenBridge` (`0x4200000000000000000000000000000000000028`).
+- [x] Support deterministic `CREATE2` deployment with caller-scoped salts.
 
 ### [ ] Milestone 3 — `TimberlineLaunchpad` v2 (`src/TimberlineLaunchpad.sol`)
 - [ ] Remove `PRO_LVR_FEE` (`0.0057 ETH`); activate LVR shield by default.
