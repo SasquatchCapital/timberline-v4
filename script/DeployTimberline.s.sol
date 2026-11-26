@@ -9,7 +9,9 @@ import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol"
 import {HookMiner} from "v4-periphery/test/shared/HookMiner.sol";
 import {TimberlineHook} from "../src/TimberlineHook.sol";
 import {TimberlineTokenDeployer} from "../src/TimberlineTokens.sol";
+import {TimberlineVault} from "../src/TimberlineVault.sol";
 import {TimberlineLaunchpad} from "../src/TimberlineLaunchpad.sol";
+import {TimberlineProvenance} from "../src/TimberlineProvenance.sol";
 
 contract DeployTimberline is Script {
     address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
@@ -36,8 +38,9 @@ contract DeployTimberline is Script {
                 );
 
         uint64 baseNonce = vm.getNonce(deployer);
-        address predictedTokenDeployer = vm.computeCreateAddress(deployer, baseNonce + 1);
-        address predictedLaunchpad = vm.computeCreateAddress(deployer, baseNonce + 2);
+        address predictedVault = vm.computeCreateAddress(deployer, baseNonce + 1);
+        address predictedTokenDeployer = vm.computeCreateAddress(deployer, baseNonce + 2);
+        address predictedLaunchpad = vm.computeCreateAddress(deployer, baseNonce + 3);
 
         uint160 flags = uint160(
             Hooks.BEFORE_INITIALIZE_FLAG |
@@ -57,6 +60,12 @@ contract DeployTimberline is Script {
 
         vm.startBroadcast(deployerPk);
         TimberlineHook hook = new TimberlineHook{salt: salt}(IPoolManager(poolManager), predictedLaunchpad, treasury);
+        TimberlineVault vault = new TimberlineVault(
+            IPoolManager(poolManager),
+            IPositionManager(positionManager),
+            IAllowanceTransfer(PERMIT2),
+            predictedLaunchpad
+        );
         TimberlineTokenDeployer tokenDeployer = new TimberlineTokenDeployer(predictedLaunchpad);
         TimberlineLaunchpad launchpad = new TimberlineLaunchpad(
             IPoolManager(poolManager),
@@ -64,12 +73,15 @@ contract DeployTimberline is Script {
             IAllowanceTransfer(PERMIT2),
             hook,
             tokenDeployer,
+            vault,
             treasury,
             usdc
         );
+        TimberlineProvenance provenance = new TimberlineProvenance(launchpad, vault);
         vm.stopBroadcast();
 
         require(address(hook) == expectedHook, "HOOK_ADDR_MISMATCH");
+        require(address(vault) == predictedVault, "VAULT_ADDR_MISMATCH");
         require(address(tokenDeployer) == predictedTokenDeployer, "TOKEN_DEPLOYER_MISMATCH");
         require(address(launchpad) == predictedLaunchpad, "LAUNCHPAD_ADDR_MISMATCH");
 
@@ -77,8 +89,10 @@ contract DeployTimberline is Script {
         console2.log("Deployer:               ", deployer);
         console2.log("Treasury:               ", treasury);
         console2.log("TimberlineHook v2:      ", address(hook));
+        console2.log("TimberlineVault v2:     ", address(vault));
         console2.log("TimberlineTokenDeployer:", address(tokenDeployer));
         console2.log("TimberlineLaunchpad v2: ", address(launchpad));
+        console2.log("TimberlineProvenance:   ", address(provenance));
         console2.log("USDC Asset:             ", usdc);
     }
 }

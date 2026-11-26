@@ -106,6 +106,155 @@ contract TimberlineSuperchainToken is ERC20, ERC20Permit, IERC7802 {
     }
 }
 
+interface IBlueprintSubFactory {
+    function deploy(
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        address recipient_,
+        bytes32 salt_
+    ) external returns (address);
+
+    function initCodeHash(
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        address recipient_
+    ) external pure returns (bytes32);
+}
+
+contract TimberlineStandardFactory is IBlueprintSubFactory {
+    address public immutable DEPLOYER;
+
+    error OnlyDeployer();
+
+    constructor() {
+        DEPLOYER = msg.sender;
+    }
+
+    function deploy(
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        address recipient_,
+        bytes32 salt_
+    ) external returns (address) {
+        if (msg.sender != DEPLOYER) revert OnlyDeployer();
+        return address(new TimberlineStandardToken{salt: salt_}(name_, symbol_, totalSupply_, recipient_));
+    }
+
+    function initCodeHash(
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        address recipient_
+    ) external pure returns (bytes32) {
+        return keccak256(
+            bytes.concat(type(TimberlineStandardToken).creationCode, abi.encode(name_, symbol_, totalSupply_, recipient_))
+        );
+    }
+}
+
+contract TimberlineBurnableFactory is IBlueprintSubFactory {
+    address public immutable DEPLOYER;
+
+    error OnlyDeployer();
+
+    constructor() {
+        DEPLOYER = msg.sender;
+    }
+
+    function deploy(
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        address recipient_,
+        bytes32 salt_
+    ) external returns (address) {
+        if (msg.sender != DEPLOYER) revert OnlyDeployer();
+        return address(new TimberlineBurnableToken{salt: salt_}(name_, symbol_, totalSupply_, recipient_));
+    }
+
+    function initCodeHash(
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        address recipient_
+    ) external pure returns (bytes32) {
+        return keccak256(
+            bytes.concat(type(TimberlineBurnableToken).creationCode, abi.encode(name_, symbol_, totalSupply_, recipient_))
+        );
+    }
+}
+
+contract TimberlineGovernanceFactory is IBlueprintSubFactory {
+    address public immutable DEPLOYER;
+
+    error OnlyDeployer();
+
+    constructor() {
+        DEPLOYER = msg.sender;
+    }
+
+    function deploy(
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        address recipient_,
+        bytes32 salt_
+    ) external returns (address) {
+        if (msg.sender != DEPLOYER) revert OnlyDeployer();
+        return address(new TimberlineGovernanceToken{salt: salt_}(name_, symbol_, totalSupply_, recipient_));
+    }
+
+    function initCodeHash(
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        address recipient_
+    ) external pure returns (bytes32) {
+        return keccak256(
+            bytes.concat(
+                type(TimberlineGovernanceToken).creationCode, abi.encode(name_, symbol_, totalSupply_, recipient_)
+            )
+        );
+    }
+}
+
+contract TimberlineSuperchainFactory is IBlueprintSubFactory {
+    address public immutable DEPLOYER;
+
+    error OnlyDeployer();
+
+    constructor() {
+        DEPLOYER = msg.sender;
+    }
+
+    function deploy(
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        address recipient_,
+        bytes32 salt_
+    ) external returns (address) {
+        if (msg.sender != DEPLOYER) revert OnlyDeployer();
+        return address(new TimberlineSuperchainToken{salt: salt_}(name_, symbol_, totalSupply_, recipient_));
+    }
+
+    function initCodeHash(
+        string calldata name_,
+        string calldata symbol_,
+        uint256 totalSupply_,
+        address recipient_
+    ) external pure returns (bytes32) {
+        return keccak256(
+            bytes.concat(
+                type(TimberlineSuperchainToken).creationCode, abi.encode(name_, symbol_, totalSupply_, recipient_)
+            )
+        );
+    }
+}
+
 /// @title TimberlineTokenDeployer v2
 /// @notice Immutable, stateless deterministic CREATE2 token blueprint factory callable solely
 ///         by TimberlineLaunchpad.
@@ -118,12 +267,21 @@ contract TimberlineTokenDeployer {
     }
 
     address public immutable LAUNCHPAD;
+    IBlueprintSubFactory public immutable STANDARD_FACTORY;
+    IBlueprintSubFactory public immutable BURNABLE_FACTORY;
+    IBlueprintSubFactory public immutable GOVERNANCE_FACTORY;
+    IBlueprintSubFactory public immutable SUPERCHAIN_FACTORY;
 
     error OnlyLaunchpad();
+    error ZeroLaunchpad();
 
     constructor(address _launchpad) {
-        require(_launchpad != address(0), "ZERO_ADDR");
+        if (_launchpad == address(0)) revert ZeroLaunchpad();
         LAUNCHPAD = _launchpad;
+        STANDARD_FACTORY = new TimberlineStandardFactory();
+        BURNABLE_FACTORY = new TimberlineBurnableFactory();
+        GOVERNANCE_FACTORY = new TimberlineGovernanceFactory();
+        SUPERCHAIN_FACTORY = new TimberlineSuperchainFactory();
     }
 
     function deployToken(
@@ -136,18 +294,8 @@ contract TimberlineTokenDeployer {
         bytes32 userSalt_
     ) external returns (address token) {
         if (msg.sender != LAUNCHPAD) revert OnlyLaunchpad();
-
         bytes32 salt = keccak256(abi.encode(creator_, userSalt_));
-
-        if (blueprint == Blueprint.STANDARD) {
-            token = address(new TimberlineStandardToken{salt: salt}(name_, symbol_, totalSupply_, recipient_));
-        } else if (blueprint == Blueprint.BURNABLE) {
-            token = address(new TimberlineBurnableToken{salt: salt}(name_, symbol_, totalSupply_, recipient_));
-        } else if (blueprint == Blueprint.GOVERNANCE) {
-            token = address(new TimberlineGovernanceToken{salt: salt}(name_, symbol_, totalSupply_, recipient_));
-        } else {
-            token = address(new TimberlineSuperchainToken{salt: salt}(name_, symbol_, totalSupply_, recipient_));
-        }
+        return _factoryFor(blueprint).deploy(name_, symbol_, totalSupply_, recipient_, salt);
     }
 
     /// @notice Precomputes the deterministic CREATE2 token address for a given creator and salt.
@@ -160,27 +308,16 @@ contract TimberlineTokenDeployer {
         bytes32 userSalt_
     ) external view returns (address) {
         bytes32 salt = keccak256(abi.encode(creator_, userSalt_));
-        bytes memory creationCode = _getCreationCode(blueprint, name_, symbol_, totalSupply_, LAUNCHPAD);
-        bytes32 hash = keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, keccak256(creationCode)));
+        IBlueprintSubFactory factory = _factoryFor(blueprint);
+        bytes32 codeHash = factory.initCodeHash(name_, symbol_, totalSupply_, LAUNCHPAD);
+        bytes32 hash = keccak256(abi.encodePacked(bytes1(0xff), address(factory), salt, codeHash));
         return address(uint160(uint256(hash)));
     }
 
-    function _getCreationCode(
-        Blueprint blueprint,
-        string calldata name_,
-        string calldata symbol_,
-        uint256 totalSupply_,
-        address recipient_
-    ) internal pure returns (bytes memory) {
-        bytes memory args = abi.encode(name_, symbol_, totalSupply_, recipient_);
-        if (blueprint == Blueprint.STANDARD) {
-            return bytes.concat(type(TimberlineStandardToken).creationCode, args);
-        } else if (blueprint == Blueprint.BURNABLE) {
-            return bytes.concat(type(TimberlineBurnableToken).creationCode, args);
-        } else if (blueprint == Blueprint.GOVERNANCE) {
-            return bytes.concat(type(TimberlineGovernanceToken).creationCode, args);
-        } else {
-            return bytes.concat(type(TimberlineSuperchainToken).creationCode, args);
-        }
+    function _factoryFor(Blueprint blueprint) internal view returns (IBlueprintSubFactory) {
+        if (blueprint == Blueprint.STANDARD) return STANDARD_FACTORY;
+        if (blueprint == Blueprint.BURNABLE) return BURNABLE_FACTORY;
+        if (blueprint == Blueprint.GOVERNANCE) return GOVERNANCE_FACTORY;
+        return SUPERCHAIN_FACTORY;
     }
 }

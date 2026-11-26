@@ -25,6 +25,8 @@ import {
     IERC7802
 } from "../src/TimberlineTokens.sol";
 import {TimberlineLaunchpad} from "../src/TimberlineLaunchpad.sol";
+import {TimberlineVault} from "../src/TimberlineVault.sol";
+import {TimberlineProvenance} from "../src/TimberlineProvenance.sol";
 
 interface IERC721Owner {
     function ownerOf(uint256 tokenId) external view returns (address);
@@ -74,7 +76,9 @@ contract TimberlineLaunchpadForkTest is Test {
 
     TimberlineHook hook;
     TimberlineTokenDeployer tokenDeployer;
+    TimberlineVault vault;
     TimberlineLaunchpad launchpad;
+    TimberlineProvenance provenance;
     PoolSwapTest swapRouter;
     PoolModifyLiquidityTest lpRouter;
 
@@ -90,7 +94,7 @@ contract TimberlineLaunchpadForkTest is Test {
         vm.createSelectFork(vm.envString("BASE_RPC_URL"));
 
         uint64 nonce = vm.getNonce(address(this));
-        address predictedLaunchpad = vm.computeCreateAddress(address(this), nonce + 2);
+        address predictedLaunchpad = vm.computeCreateAddress(address(this), nonce + 3);
 
         uint160 flags = uint160(
             Hooks.BEFORE_INITIALIZE_FLAG |
@@ -109,6 +113,12 @@ contract TimberlineLaunchpadForkTest is Test {
         );
 
         hook = new TimberlineHook{salt: salt}(IPoolManager(POOL_MANAGER_ADDR), predictedLaunchpad, VAULT_ADDR);
+        vault = new TimberlineVault(
+            IPoolManager(POOL_MANAGER_ADDR),
+            IPositionManager(POSM_ADDR),
+            IAllowanceTransfer(PERMIT2_ADDR),
+            predictedLaunchpad
+        );
         tokenDeployer = new TimberlineTokenDeployer(predictedLaunchpad);
         launchpad = new TimberlineLaunchpad(
             IPoolManager(POOL_MANAGER_ADDR),
@@ -116,12 +126,14 @@ contract TimberlineLaunchpadForkTest is Test {
             IAllowanceTransfer(PERMIT2_ADDR),
             hook,
             tokenDeployer,
+            vault,
             VAULT_ADDR,
             USDC_ADDR
         );
 
         require(address(hook) == expectedHook, "HOOK_ADDR_MISMATCH");
         require(address(launchpad) == predictedLaunchpad, "LAUNCHPAD_ADDR_MISMATCH");
+        provenance = new TimberlineProvenance(launchpad, vault);
 
         swapRouter = new PoolSwapTest(IPoolManager(POOL_MANAGER_ADDR));
         lpRouter = new PoolModifyLiquidityTest(IPoolManager(POOL_MANAGER_ADDR));
@@ -160,7 +172,7 @@ contract TimberlineLaunchpadForkTest is Test {
             maxBlockQuoteVolume: 0,
             lpLockDuration: 30 days,
             lpVestingDuration: 0,
-            vestingTranches: new TimberlineLaunchpad.VestingTrancheInput[](0),
+            vestingTranches: new TimberlineVault.VestingTrancheInput[](0),
             devBuyQuoteAmount: 0,
             minDevBuyTokensOut: 0,
             devBuyRecipient: address(0),
@@ -192,9 +204,9 @@ contract TimberlineLaunchpadForkTest is Test {
 
         // Zero upfront Pro LVR fee in V2
         assertEq(VAULT_ADDR.balance, vaultBefore, "No upfront LVR fee charged in V2");
-        assertEq(IERC721Owner(POSM_ADDR).ownerOf(lpTokenId), address(launchpad), "LP NFT locked in launchpad");
+        assertEq(IERC721Owner(POSM_ADDR).ownerOf(lpTokenId), address(vault), "LP NFT locked in vault");
 
-        TimberlineLaunchpad.ProvenanceCertificate memory cert = launchpad.getLaunchCertificateByToken(token);
+        TimberlineProvenance.ProvenanceCertificate memory cert = provenance.getLaunchCertificateByToken(token);
         assertEq(cert.launchId, launchId);
         assertEq(PoolId.unwrap(cert.poolId), PoolId.unwrap(poolId));
         assertEq(cert.baseLpFeePips, 5_000);
@@ -231,15 +243,15 @@ contract TimberlineLaunchpadForkTest is Test {
         // Warp past 30d lock WITHOUT calling harvestLpFees first; unlockLp must auto-harvest for coFounder
         vm.warp(vm.getBlockTimestamp() + 30 days + 1);
         vm.prank(creator);
-        launchpad.unlockLp(launchId, creator);
+        vault.unlockLp(launchId, creator);
         assertEq(IERC721Owner(POSM_ADDR).ownerOf(lpTokenId), creator);
 
-        uint256 coFounderClaimable = launchpad.claimableFees(launchId, coFounder, CurrencyLibrary.ADDRESS_ZERO);
+        uint256 coFounderClaimable = vault.claimableFees(launchId, coFounder, CurrencyLibrary.ADDRESS_ZERO);
         assertGt(coFounderClaimable, 0, "unlockLp must auto-harvest accrued fees for co-recipients");
 
         uint256 coFounderBefore = coFounder.balance;
         vm.prank(coFounder);
-        launchpad.claimFees(launchId, CurrencyLibrary.ADDRESS_ZERO);
+        vault.claimFees(launchId, CurrencyLibrary.ADDRESS_ZERO);
         assertEq(coFounder.balance - coFounderBefore, coFounderClaimable);
     }
 
@@ -248,14 +260,14 @@ contract TimberlineLaunchpadForkTest is Test {
     // =========================================================================
 
     function testFork_V2MultiTrancheVestingAndSuperchainCreate2() public {
-        TimberlineLaunchpad.VestingTrancheInput[] memory tranches = new TimberlineLaunchpad.VestingTrancheInput[](2);
-        tranches[0] = TimberlineLaunchpad.VestingTrancheInput({
+        TimberlineVault.VestingTrancheInput[] memory tranches = new TimberlineVault.VestingTrancheInput[](2);
+        tranches[0] = TimberlineVault.VestingTrancheInput({
             beneficiary: coFounder,
             amount: 200_000e18,
             cliffDuration: 14 days,
             vestingDuration: 60 days
         });
-        tranches[1] = TimberlineLaunchpad.VestingTrancheInput({
+        tranches[1] = TimberlineVault.VestingTrancheInput({
             beneficiary: treasuryWallet,
             amount: 100_000e18,
             cliffDuration: 30 days,
@@ -309,17 +321,17 @@ contract TimberlineLaunchpadForkTest is Test {
         // Verify multi-tranche cliff & linear claims at Day 29 (Tranche 0 unlocked 15/60d; Tranche 1 still in 30d cliff)
         vm.warp(vm.getBlockTimestamp() + 29 days);
         vm.prank(coFounder);
-        uint256 claimedCoFounder = launchpad.claimAllVestedTokens(launchId);
+        uint256 claimedCoFounder = vault.claimAllVestedTokens(launchId);
         assertApproxEqAbs(claimedCoFounder, 50_000e18, 2_000);
-        assertEq(launchpad.getClaimableVested(launchId, 1), 0, "Tranche 1 still in 30d cliff");
+        assertEq(vault.getClaimableVested(launchId, 1), 0, "Tranche 1 still in 30d cliff");
 
         vm.warp(vm.getBlockTimestamp() + 120 days);
         vm.prank(coFounder);
-        launchpad.claimAllVestedTokens(launchId);
+        vault.claimAllVestedTokens(launchId);
         vm.prank(treasuryWallet);
-        launchpad.claimAllVestedTokens(launchId);
+        vault.claimAllVestedTokens(launchId);
 
-        uint256 tranche0Total = launchpad.getLaunchCertificate(launchId).vestingTranches[0].totalAmount;
+        uint256 tranche0Total = provenance.getLaunchCertificate(launchId).vestingTranches[0].totalAmount;
         assertGe(tranche0Total, 200_000e18);
         assertEq(IERC20(token).balanceOf(coFounder), tranche0Total, "Tranche 0 absorbs tick-rounding dust for zero free float");
         assertEq(IERC20(token).balanceOf(treasuryWallet), 100_000e18);
@@ -367,7 +379,7 @@ contract TimberlineLaunchpadForkTest is Test {
         uint256 bought = IERC20(token).balanceOf(creator);
         assertGt(bought, 0);
 
-        TimberlineLaunchpad.ProvenanceCertificate memory cert = launchpad.getLaunchCertificateByToken(token);
+        TimberlineProvenance.ProvenanceCertificate memory cert = provenance.getLaunchCertificateByToken(token);
         assertEq(cert.baseLpFeePips, 10_000);
         assertEq(cert.devBuyQuoteAmount, 25e6, "Provenance Seal must disclose devBuy quote spent");
         assertGt(cert.devBuyTokensBought, 0);
@@ -401,27 +413,27 @@ contract TimberlineLaunchpadForkTest is Test {
             })
         );
 
-        assertEq(launchpad.getLaunchCertificateByToken(token).creator, safeMultisig2of3);
+        assertEq(provenance.getLaunchCertificateByToken(token).creator, safeMultisig2of3);
 
         // Two-step transfer from 2/3 Safe to 3/5 Safe
         vm.prank(safeMultisig2of3);
-        launchpad.proposeCreator(launchId, safeMultisig3of5);
-        assertEq(launchpad.pendingCreator(launchId), safeMultisig3of5);
+        vault.proposeCreator(launchId, safeMultisig3of5);
+        assertEq(vault.pendingCreator(launchId), safeMultisig3of5);
 
         vm.prank(attacker);
-        vm.expectRevert(TimberlineLaunchpad.OnlyPendingCreator.selector);
-        launchpad.acceptCreator(launchId);
+        vm.expectRevert(TimberlineVault.OnlyPendingCreator.selector);
+        vault.acceptCreator(launchId);
 
         vm.prank(safeMultisig3of5);
-        launchpad.acceptCreator(launchId);
-        assertEq(launchpad.getLaunchCertificateByToken(token).creator, safeMultisig3of5);
+        vault.acceptCreator(launchId);
+        assertEq(provenance.getLaunchCertificateByToken(token).creator, safeMultisig3of5);
 
         // Anchor immutable audit report hash onto Provenance Seal
         bytes32 auditHash = keccak256("Spearbit-Cantina-Timberline-V2-Audit-Report");
         vm.prank(safeMultisig3of5);
-        launchpad.addDisclosureHash(launchId, auditHash, "Security Review Report");
+        vault.addDisclosureHash(launchId, auditHash, "Security Review Report");
 
-        TimberlineLaunchpad.ProvenanceCertificate memory cert = launchpad.getLaunchCertificateByToken(token);
+        TimberlineProvenance.ProvenanceCertificate memory cert = provenance.getLaunchCertificateByToken(token);
         assertEq(cert.disclosures.length, 1);
         assertEq(cert.disclosures[0].docHash, auditHash);
     }
@@ -447,7 +459,7 @@ contract TimberlineLaunchpadForkTest is Test {
             })
         );
 
-        uint128 initialLiq = launchpad.getLaunchCertificate(launchId).initialLiquidity;
+        uint128 initialLiq = provenance.getLaunchCertificate(launchId).initialLiquidity;
 
         PoolKey memory key = PoolKey({
             currency0: CurrencyLibrary.ADDRESS_ZERO,
@@ -484,14 +496,14 @@ contract TimberlineLaunchpadForkTest is Test {
         vm.stopPrank();
 
         // Permissionlessly auto-compound accrued fees back into locked Position NFT
-        (uint128 addedLiq,,) = launchpad.compoundLpFees(launchId);
+        (uint128 addedLiq,,) = vault.compoundLpFees(launchId);
         assertGt(addedLiq, 0, "Auto-compound must increase locked LP liquidity");
-        assertEq(launchpad.getLaunchCertificate(launchId).initialLiquidity, initialLiq + addedLiq);
+        assertEq(provenance.getLaunchCertificate(launchId).initialLiquidity, initialLiq + addedLiq);
 
         // At Day 60 (midpoint of 30d..90d linear LP unlock), creator withdraws ~50% of principal
         vm.warp(vm.getBlockTimestamp() + 30 days + 30 days);
         vm.prank(creator);
-        uint128 removed = launchpad.withdrawLinearLp(launchId, creator);
+        uint128 removed = vault.withdrawLinearLp(launchId, creator);
         assertApproxEqRel(removed, (initialLiq + addedLiq) / 2, 0.02e18);
     }
 
@@ -627,7 +639,7 @@ contract TimberlineLaunchpadForkTest is Test {
         );
         vm.stopPrank();
 
-        (uint256 earned0, uint256 earned1) = launchpad.harvestLpFees(launchId1);
+        (uint256 earned0, uint256 earned1) = vault.harvestLpFees(launchId1);
         uint256 harvestedUsdc = usdcIs0 ? earned0 : earned1;
         assertGt(harvestedUsdc, 0);
 
@@ -662,9 +674,14 @@ contract TimberlineLaunchpadForkTest is Test {
         vm.stopPrank();
 
         assertEq(
-            IERC20(USDC_ADDR).balanceOf(address(launchpad)),
+            IERC20(USDC_ADDR).balanceOf(address(vault)),
             harvestedUsdc,
-            "Harvested USDC from Launch #1 must never be swept by Launch #2 refunds"
+            "Harvested USDC from Launch #1 must remain isolated in TimberlineVault"
+        );
+        assertEq(
+            IERC20(USDC_ADDR).balanceOf(address(launchpad)),
+            0,
+            "Launchpad must retain zero residual USDC after Launch #2 delta refund"
         );
     }
 

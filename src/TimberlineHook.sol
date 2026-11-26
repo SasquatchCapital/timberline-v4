@@ -238,7 +238,7 @@ contract TimberlineHook is BaseHook {
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         PoolId id = key.toId();
-        PoolConfig memory cfg = poolConfigs[id];
+        PoolConfig storage cfg = poolConfigs[id];
         if (!cfg.initialized) revert PoolNotRegistered();
 
         PoolRuntime storage rt = poolRuntimes[id];
@@ -304,7 +304,7 @@ contract TimberlineHook is BaseHook {
         bytes calldata
     ) external override onlyPoolManager returns (bytes4, int128) {
         PoolId id = key.toId();
-        PoolConfig memory cfg = poolConfigs[id];
+        PoolConfig storage cfg = poolConfigs[id];
 
         bool specifiedIsCurrency0 = (params.amountSpecified < 0) ? params.zeroForOne : !params.zeroForOne;
         bool quoteIsSpecified = (specifiedIsCurrency0 == cfg.quoteIsCurrency0);
@@ -336,7 +336,7 @@ contract TimberlineHook is BaseHook {
     }
 
     function _computeActiveFees(
-        PoolConfig memory cfg,
+        PoolConfig storage cfg,
         PoolRuntime storage rt,
         uint160 spotSqrtPriceX96,
         bool zeroForOne,
@@ -390,7 +390,7 @@ contract TimberlineHook is BaseHook {
 
     /// @notice Enforces per-block quote volume cap strictly during the anti-snipe decay window.
     function _enforceLaunchBlockCap(
-        PoolConfig memory cfg,
+        PoolConfig storage cfg,
         PoolRuntime storage rt,
         uint256 quoteVolume,
         uint40 nowTs
