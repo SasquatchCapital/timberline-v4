@@ -26,14 +26,14 @@ Target window: **November 25 – December 31, 2026** (aligned with V1 `$TMBR` lo
 - [x] Add Blueprint #4: **`SUPERCHAIN` (`SuperchainERC20` / ERC-7802)** restricted strictly to Base's canonical `SuperchainTokenBridge` (`0x4200000000000000000000000000000000000028`).
 - [x] Support deterministic `CREATE2` deployment with caller-scoped salts.
 
-### [ ] Milestone 3 — `TimberlineLaunchpad` v2 (`src/TimberlineLaunchpad.sol`)
-- [ ] Remove `PRO_LVR_FEE` (`0.0057 ETH`); activate LVR shield by default.
-- [ ] Enforce delta-tracked unused-quote refunds (`balAfter - balBefore`) and minimum settled quote liquidity (`actualQuoteDeposited >= MIN_SEED`).
-- [ ] Direct-push LP fee payouts to `feeRecipients` inside `_harvestLpFees()` and auto-harvest inside `unlockLp()`.
-- [ ] Add optional permissionless `compoundLpFees(launchId)` (`INCREASE_LIQUIDITY` back into locked Position NFT).
-- [ ] Add multi-tranche cap-table vesting (up to 4 tranches) and optional linear LP principal unlock schedules.
-- [ ] Add first-class multisig support (explicit `creator` param for 1/1, 2/3, or 3/5 Safe wallets + two-step `proposeCreator` / `acceptCreator`).
-- [ ] Record `devBuyQuoteAmount` & `devBuyTokensBought` plus append-only audit/disclosure hashes on `ProvenanceCertificate`.
+### [x] Milestone 3 — `TimberlineLaunchpad` v2 (`src/TimberlineLaunchpad.sol`)
+- [x] Remove `PRO_LVR_FEE` (`0.0057 ETH`); activate LVR shield by default.
+- [x] Enforce delta-tracked unused-quote refunds (`balAfter - balBefore`) and minimum settled quote liquidity (`actualQuoteDeposited >= MIN_SEED`).
+- [x] Auto-harvest inside `unlockLp()` to `feeRecipients` inside `_harvestLpFees()` and auto-harvest inside `unlockLp()`.
+- [x] Add optional permissionless `compoundLpFees(launchId)` (`INCREASE_LIQUIDITY` back into locked Position NFT).
+- [x] Add multi-tranche cap-table vesting (up to 4 tranches) and optional linear LP principal unlock schedules.
+- [x] Add first-class multisig support (explicit `creator` param for 1/1, 2/3, or 3/5 Safe wallets + two-step `proposeCreator` / `acceptCreator`).
+- [x] Record `devBuyQuoteAmount` & `devBuyTokensBought` plus append-only audit/disclosure hashes on `ProvenanceCertificate`.
 
 ### [ ] Milestone 4 — Foundry Fuzz/Invariant Suite & Audit Freeze (`v2.0.0-freeze`)
 - [ ] Unit tests covering all 4 token blueprints, 3 LP fee tiers, 3 anti-snipe presets, and Safe handoffs.

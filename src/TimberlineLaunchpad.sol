@@ -24,12 +24,13 @@ interface IERC721Transfer {
     function transferFrom(address from, address to, uint256 tokenId) external;
 }
 
-/// @title TimberlineLaunchpad
+/// @title TimberlineLaunchpad v2
 /// @notice Unified, non-custodial Exclusive Concierge Token Service (ECTS) for Uniswap v4 on Base.
-///         Atomically deploys audited zero-admin ERC-20 blueprints (or validates external ERC-20s),
+///         Deploys deterministic CREATE2 zero-admin ERC-20 blueprints (or validates external ERC-20s),
 ///         initializes TimberlineHook-protected v4 pools above a skin-in-the-game seed floor,
-///         time-locks LP principal with pull-based multi-recipient fee harvesting, enforces zero
-///         free-float time-linear vesting on unpooled tokens, and exposes single-call Provenance Seals.
+///         time-locks LP principal (cliff, linear unlock, or permanent) with auto-compounding and
+///         multi-recipient fee splits, enforces multi-tranche cap-table vesting, supports Safe
+///         multisig creators with two-step handoffs, and compiles single-call Provenance Seals.
 contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
@@ -38,14 +39,15 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
 
     uint256 public constant MIN_ETH_SEED = 0.5 ether;
     uint256 public constant MIN_USDC_SEED = 1_000e6;
-    uint256 public constant PRO_LVR_FEE = 0.0057 ether;
     uint64 public constant MIN_LP_LOCK_DURATION = 30 days;
     uint64 public constant MIN_CLIFF_DURATION = 14 days;
+    uint64 public constant MIN_VESTING_DURATION = 1 days;
     uint256 public constant MIN_POOL_ALLOCATION_BPS = 5_000; // >= 50.00% paired in locked pool
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint256 public constant MAX_FEE_RECIPIENTS = 4;
+    uint256 public constant MAX_VESTING_TRANCHES = 4;
     int24 public constant DEFAULT_TICK_SPACING = 60;
-    uint256 public constant DEFAULT_BLOCK_CAP_BPS = 250; // 2.50% of initial quote per block
+    uint256 public constant DEFAULT_BLOCK_CAP_BPS = 500; // 5.00% of initial quote per block during launch window
 
     IPoolManager public immutable POOL_MANAGER;
     IPositionManager public immutable POSITION_MANAGER;
@@ -55,23 +57,44 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
     address public immutable TREASURY;
     address public immutable USDC;
 
+    struct VestingTrancheInput {
+        address beneficiary;
+        uint256 amount;
+        uint64 cliffDuration;
+        uint64 vestingDuration;
+    }
+
+    struct VestingTranche {
+        address beneficiary;
+        uint256 totalAmount;
+        uint256 claimedAmount;
+        uint64 cliffEnd;
+        uint64 vestingEnd;
+    }
+
+    struct DisclosureRecord {
+        bytes32 docHash;
+        string label;
+        uint64 timestamp;
+    }
+
     struct PoolLaunchConfig {
+        address creator;                // Explicit creator / Safe multisig (address(0) = msg.sender)
         address quoteToken;             // address(0) for Native ETH, or USDC
         uint256 poolTokenAmount;        // Tokens paired in Uniswap v4 pool
         uint256 quoteTokenAmount;       // ETH or USDC paired in Uniswap v4 pool
         uint160 sqrtPriceX96;           // Initial pool sqrtPriceX96
         int24 tickLower;                // Position lower tick
         int24 tickUpper;                // Position upper tick
+        uint24 baseLpFeePips;           // Creator base LP fee tier: 3_000, 5_000, or 10_000
         TimberlineHook.SnipePreset snipePreset;
-        bool proLvrEnabled;
-        uint128 maxBlockQuoteVolume;    // 0 = default 2.50% of quoteTokenAmount per block
+        uint128 maxBlockQuoteVolume;    // Launch-window block cap (0 = default 5.00% of quoteTokenAmount)
         uint64 lpLockDuration;          // Must be >= 30 days (use type(uint64).max for permanent)
-        address vestingBeneficiary;     // Required if unpooled tokens > 0
-        uint64 cliffDuration;           // Must be >= 14 days if unpooled tokens > 0
-        uint64 vestingDuration;         // Linear release duration after cliff
+        uint64 lpVestingDuration;       // 0 = full NFT release at lpUnlockTime; > 0 = linear principal unlock
+        VestingTrancheInput[] vestingTranches; // Up to 4 cap-table vesting schedules
         uint256 devBuyQuoteAmount;      // Optional atomic initial buy in quote asset
         uint256 minDevBuyTokensOut;     // Slippage floor for atomic initial buy
-        address devBuyRecipient;        // Recipient of atomic initial buy (defaults to msg.sender)
+        address devBuyRecipient;        // Recipient of atomic initial buy (defaults to creator)
         address[] feeRecipients;        // Optional split recipients (1..4); empty = 100% creator
         uint16[] feeSharesBps;          // Must sum to 10,000 bps if feeRecipients non-empty
     }
@@ -81,13 +104,13 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         string name;
         string symbol;
         uint256 totalSupply;
+        bytes32 salt;                   // User salt for deterministic CREATE2 token address
         PoolLaunchConfig pool;
     }
 
     struct ExistingTokenLaunchParams {
         address token;
         uint256 totalSupply;
-        uint256 vestedTokenAmount;
         PoolLaunchConfig pool;
     }
 
@@ -101,17 +124,18 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         TimberlineTokenDeployer.Blueprint blueprint;
         bool isNativeBlueprint;
         bool lpUnlocked;
-        bool proLvrEnabled;
+        uint24 baseLpFeePips;
         TimberlineHook.SnipePreset snipePreset;
         uint256 totalSupply;
         uint256 poolTokenAmount;
         uint256 initialQuoteAmount;
+        uint128 initialLiquidity;
+        uint128 liquidityWithdrawn;
         uint64 lpUnlockTime;
-        address vestingBeneficiary;
+        uint64 lpVestingEnd;
         uint256 vestedTotal;
-        uint256 vestedClaimed;
-        uint64 cliffEnd;
-        uint64 vestingEnd;
+        uint256 devBuyQuoteAmount;
+        uint256 devBuyTokensBought;
     }
 
     struct ProvenanceCertificate {
@@ -121,25 +145,29 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         PoolId poolId;
         uint256 lpTokenId;
         address creator;
+        address pendingCreator;
         TimberlineTokenDeployer.Blueprint blueprint;
         bool isNativeBlueprint;
         bool lpUnlocked;
-        bool proLvrEnabled;
+        uint24 baseLpFeePips;
         TimberlineHook.SnipePreset snipePreset;
         uint256 totalSupply;
         uint256 poolTokenAmount;
         uint256 initialQuoteAmount;
         uint256 pairedSupplyBps;
+        uint128 initialLiquidity;
+        uint128 liquidityWithdrawn;
         uint64 lpUnlockTime;
-        address vestingBeneficiary;
+        uint64 lpVestingEnd;
         uint256 vestedTotal;
-        uint256 vestedClaimed;
-        uint64 cliffEnd;
-        uint64 vestingEnd;
+        uint256 devBuyQuoteAmount;
+        uint256 devBuyTokensBought;
         address hookAddress;
         address treasuryAddress;
         address[] feeRecipients;
         uint16[] feeSharesBps;
+        VestingTranche[] vestingTranches;
+        DisclosureRecord[] disclosures;
     }
 
     struct PendingDevBuy {
@@ -149,6 +177,7 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         uint256 quoteAmountIn;
         uint256 minTokensOut;
         address recipient;
+        uint256 tokensBought;
     }
 
     uint256 public launchCount;
@@ -156,6 +185,9 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
     mapping(uint256 => PoolKey) private _poolKeys;
     mapping(uint256 => address[]) private _feeRecipients;
     mapping(uint256 => uint16[]) private _feeSharesBps;
+    mapping(uint256 => VestingTranche[]) private _vestingTranches;
+    mapping(uint256 => DisclosureRecord[]) private _disclosures;
+    mapping(uint256 => address) public pendingCreator;
     mapping(uint256 => mapping(address => mapping(Currency => uint256))) public claimableFees;
     mapping(address => uint256) public launchIdByToken;
     mapping(PoolId => uint256) public launchIdByPool;
@@ -174,10 +206,15 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
     );
     event DevBuyExecuted(PoolId indexed poolId, address indexed recipient, uint256 quoteAmountIn, uint256 tokensBought);
     event LpFeesHarvested(uint256 indexed launchId, uint256 amount0, uint256 amount1);
+    event LpFeesCompounded(uint256 indexed launchId, uint128 addedLiquidity, uint256 amount0Used, uint256 amount1Used);
     event LpFeesClaimed(uint256 indexed launchId, address indexed recipient, Currency indexed currency, uint256 amount);
     event LpLockExtended(uint256 indexed launchId, uint64 newUnlockTime);
+    event LinearLpWithdrawn(uint256 indexed launchId, address indexed recipient, uint128 liquidityRemoved);
     event LpUnlocked(uint256 indexed launchId, address indexed recipient, uint256 lpTokenId);
-    event VestedTokensClaimed(uint256 indexed launchId, address indexed beneficiary, uint256 amount);
+    event VestedTokensClaimed(uint256 indexed launchId, uint256 indexed trancheIndex, address indexed beneficiary, uint256 amount);
+    event CreatorProposed(uint256 indexed launchId, address indexed currentCreator, address indexed proposedCreator);
+    event CreatorAccepted(uint256 indexed launchId, address indexed previousCreator, address indexed newCreator);
+    event DisclosureAnchored(uint256 indexed launchId, bytes32 indexed docHash, string label);
 
     error UnsupportedQuoteAsset();
     error InvalidTokenParams();
@@ -185,6 +222,7 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
     error InsufficientSeedLiquidity();
     error InsufficientEthSent();
     error InvalidTickRange();
+    error InvalidBaseLpFee();
     error InsufficientPoolAllocation();
     error InvalidVestingConfig();
     error InvalidLpLockDuration();
@@ -194,8 +232,11 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
     error PriceRangeMismatch();
     error SlippageExceeded();
     error OnlyCreator();
+    error OnlyPendingCreator();
+    error InvalidCreatorAddress();
     error LpStillLocked(uint64 unlockTime, uint64 currentTime);
     error LpAlreadyUnlocked();
+    error LinearLpNotConfigured();
     error LockMustIncrease();
     error NothingToClaim();
     error EthTransferFailed();
@@ -222,8 +263,8 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
 
     receive() external payable {}
 
-    /// @notice Atomically deploys a curated zero-admin OZ v5 ERC-20 blueprint, seeds & locks a
-    ///         TimberlineHook-protected v4 pool, and locks any unpooled supply into linear vesting.
+    /// @notice Atomically deploys a deterministic CREATE2 zero-admin ERC-20 blueprint, seeds & locks
+    ///         a TimberlineHook-protected v4 pool, and locks all unpooled supply into vesting tranches.
     function launchNewToken(NewTokenLaunchParams calldata params)
         external
         payable
@@ -235,29 +276,35 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         }
         if (params.pool.poolTokenAmount > params.totalSupply) revert InvalidTokenParams();
 
-        uint256 vestedAmount = params.totalSupply - params.pool.poolTokenAmount;
-        _validateLaunchConfig(params.totalSupply, params.pool.poolTokenAmount, vestedAmount, params.pool);
+        uint256 requiredVested = params.totalSupply - params.pool.poolTokenAmount;
+        uint256 sumTranches = _validateLaunchConfig(params.totalSupply, params.pool.poolTokenAmount, params.pool);
+        if (sumTranches != requiredVested) revert InvalidVestingConfig();
+
+        address creatorAddr = params.pool.creator == address(0) ? msg.sender : params.pool.creator;
 
         launchToken = TOKEN_DEPLOYER.deployToken(
             params.blueprint,
             params.name,
             params.symbol,
             params.totalSupply,
-            address(this)
+            address(this),
+            creatorAddr,
+            params.salt
         );
 
         (launchId, poolId, lpTokenId) = _executeLaunch(
             launchToken,
             params.totalSupply,
-            vestedAmount,
+            sumTranches,
             params.blueprint,
             true,
+            creatorAddr,
             params.pool
         );
     }
 
     /// @notice Launches a pre-existing audited ERC-20 under Timberline's exact same seed floor,
-    ///         zero free-float vesting rule, 30-day minimum LP lock, and TimberlineHook protection.
+    ///         multi-tranche vesting rules, minimum 30-day LP lock, and TimberlineHook protection.
     function launchExistingToken(ExistingTokenLaunchParams calldata params)
         external
         payable
@@ -270,9 +317,12 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         if (launchIdByToken[params.token] != 0) revert TokenAlreadyLaunched();
         if (IERC20(params.token).totalSupply() != params.totalSupply) revert InvalidTokenParams();
 
-        _validateLaunchConfig(params.totalSupply, params.pool.poolTokenAmount, params.vestedTokenAmount, params.pool);
+        uint256 sumTranches = _validateLaunchConfig(params.totalSupply, params.pool.poolTokenAmount, params.pool);
+        if (params.pool.poolTokenAmount + sumTranches > params.totalSupply) revert InvalidVestingConfig();
 
-        uint256 totalRequired = params.pool.poolTokenAmount + params.vestedTokenAmount;
+        address creatorAddr = params.pool.creator == address(0) ? msg.sender : params.pool.creator;
+
+        uint256 totalRequired = params.pool.poolTokenAmount + sumTranches;
         uint256 balBefore = IERC20(params.token).balanceOf(address(this));
         IERC20(params.token).safeTransferFrom(msg.sender, address(this), totalRequired);
         uint256 balAfter = IERC20(params.token).balanceOf(address(this));
@@ -281,9 +331,10 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         (launchId, poolId, lpTokenId) = _executeLaunch(
             params.token,
             params.totalSupply,
-            params.vestedTokenAmount,
+            sumTranches,
             TimberlineTokenDeployer.Blueprint.STANDARD,
             false,
+            creatorAddr,
             params.pool
         );
     }
@@ -294,25 +345,76 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         LaunchRecord storage rec = _launches[launchId];
         if (rec.launchId == 0) revert InvalidTokenParams();
         if (rec.lpUnlocked) revert LpAlreadyUnlocked();
+        return _harvestLpFees(launchId);
+    }
+
+    /// @notice Permissionlessly harvests accrued LP swap fees and compounds them directly back into
+    ///         the locked Position NFT via INCREASE_LIQUIDITY (Protocol-Owned Liquidity mode).
+    function compoundLpFees(uint256 launchId)
+        external
+        nonReentrant
+        returns (uint128 addedLiquidity, uint256 amount0Used, uint256 amount1Used)
+    {
+        LaunchRecord storage rec = _launches[launchId];
+        if (rec.launchId == 0) revert InvalidTokenParams();
+        if (rec.lpUnlocked) revert LpAlreadyUnlocked();
 
         PoolKey memory key = _poolKeys[launchId];
         uint256 bal0Before = _currencyBalance(key.currency0);
         uint256 bal1Before = _currencyBalance(key.currency1);
 
-        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory unlockParams = new bytes[](2);
-        unlockParams[0] = abi.encode(rec.lpTokenId, uint256(0), uint128(0), uint128(0), bytes(""));
-        unlockParams[1] = abi.encode(key.currency0, key.currency1, address(this));
+        // Step 1: Collect accrued fees from PositionManager to this contract
+        bytes memory collectActions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        bytes[] memory collectParams = new bytes[](2);
+        collectParams[0] = abi.encode(rec.lpTokenId, uint256(0), uint128(0), uint128(0), bytes(""));
+        collectParams[1] = abi.encode(key.currency0, key.currency1, address(this));
+        POSITION_MANAGER.modifyLiquidities(abi.encode(collectActions, collectParams), block.timestamp);
 
-        POSITION_MANAGER.modifyLiquidities(abi.encode(actions, unlockParams), block.timestamp);
+        uint256 earned0 = _currencyBalance(key.currency0) - bal0Before;
+        uint256 earned1 = _currencyBalance(key.currency1) - bal1Before;
+        if (earned0 == 0 && earned1 == 0) revert NothingToClaim();
 
-        earned0 = _currencyBalance(key.currency0) - bal0Before;
-        earned1 = _currencyBalance(key.currency1) - bal1Before;
+        // Step 2: Re-add collected fees into the locked Position NFT
+        if (!key.currency0.isAddressZero() && earned0 > 0) {
+            _approvePermit2(Currency.unwrap(key.currency0), earned0);
+        }
+        if (!key.currency1.isAddressZero() && earned1 > 0) {
+            _approvePermit2(Currency.unwrap(key.currency1), earned1);
+        }
 
-        if (earned0 > 0) _creditCurrency(launchId, key.currency0, earned0);
-        if (earned1 > 0) _creditCurrency(launchId, key.currency1, earned1);
+        uint128 liqBefore = POSITION_MANAGER.getPositionLiquidity(rec.lpTokenId);
+        bool hasNativeEth = key.currency0.isAddressZero();
 
-        emit LpFeesHarvested(launchId, earned0, earned1);
+        bytes memory incActions = hasNativeEth
+            ? abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY_FROM_DELTAS), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP))
+            : abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY_FROM_DELTAS), uint8(Actions.SETTLE_PAIR));
+
+        bytes[] memory incParams = new bytes[](hasNativeEth ? 3 : 2);
+        incParams[0] = abi.encode(rec.lpTokenId, uint128(earned0), uint128(earned1), bytes(""));
+        incParams[1] = abi.encode(key.currency0, key.currency1);
+        if (hasNativeEth) {
+            incParams[2] = abi.encode(key.currency0, address(this));
+        }
+
+        POSITION_MANAGER.modifyLiquidities{value: hasNativeEth ? earned0 : 0}(
+            abi.encode(incActions, incParams),
+            block.timestamp
+        );
+
+        uint128 liqAfter = POSITION_MANAGER.getPositionLiquidity(rec.lpTokenId);
+        addedLiquidity = liqAfter > liqBefore ? liqAfter - liqBefore : 0;
+        rec.initialLiquidity += addedLiquidity;
+
+        uint256 rem0 = _currencyBalance(key.currency0) - bal0Before;
+        uint256 rem1 = _currencyBalance(key.currency1) - bal1Before;
+        amount0Used = earned0 - rem0;
+        amount1Used = earned1 - rem1;
+
+        // Credit any unpairable leftover fee dust to configured feeRecipients
+        if (rem0 > 0) _creditCurrency(launchId, key.currency0, rem0);
+        if (rem1 > 0) _creditCurrency(launchId, key.currency1, rem1);
+
+        emit LpFeesCompounded(launchId, addedLiquidity, amount0Used, amount1Used);
     }
 
     /// @notice Pull-based withdrawal of harvested LP fees for `msg.sender`.
@@ -326,7 +428,7 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         emit LpFeesClaimed(launchId, msg.sender, currency, amount);
     }
 
-    /// @notice Allows the creator to extend the LP lock duration (or permanently lock via uint64.max).
+    /// @notice Allows the creator/Safe to extend the LP lock duration (or permanently lock via uint64.max).
     function extendLpLock(uint256 launchId, uint64 newUnlockTime) external {
         LaunchRecord storage rec = _launches[launchId];
         if (rec.launchId == 0) revert InvalidTokenParams();
@@ -335,18 +437,74 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         if (newUnlockTime <= rec.lpUnlockTime) revert LockMustIncrease();
 
         rec.lpUnlockTime = newUnlockTime;
+        if (newUnlockTime == type(uint64).max) {
+            rec.lpVestingEnd = 0;
+        } else if (rec.lpVestingEnd != 0 && rec.lpVestingEnd < newUnlockTime) {
+            rec.lpVestingEnd = newUnlockTime;
+        }
         emit LpLockExtended(launchId, newUnlockTime);
     }
 
-    /// @notice Releases the Uniswap v4 LP NFT to `recipient` once the mandatory lock timer expires.
+    /// @notice Withdraws linearly unlocked LP principal between `lpUnlockTime` and `lpVestingEnd`
+    ///         when a staged linear LP unlock schedule was configured at launch.
+    function withdrawLinearLp(uint256 launchId, address recipient) external nonReentrant returns (uint128 toRemove) {
+        LaunchRecord storage rec = _launches[launchId];
+        if (rec.launchId == 0) revert InvalidTokenParams();
+        if (msg.sender != rec.creator) revert OnlyCreator();
+        if (rec.lpUnlocked) revert LpAlreadyUnlocked();
+        if (rec.lpVestingEnd == 0) revert LinearLpNotConfigured();
+        if (block.timestamp < rec.lpUnlockTime) {
+            revert LpStillLocked(rec.lpUnlockTime, uint64(block.timestamp));
+        }
+
+        uint128 activeLiq = POSITION_MANAGER.getPositionLiquidity(rec.lpTokenId);
+        uint128 totalTracked = activeLiq + rec.liquidityWithdrawn;
+
+        uint256 unlockedTotal;
+        if (block.timestamp >= rec.lpVestingEnd) {
+            unlockedTotal = totalTracked;
+        } else {
+            uint256 elapsed = block.timestamp - rec.lpUnlockTime;
+            uint256 duration = rec.lpVestingEnd - rec.lpUnlockTime;
+            unlockedTotal = (uint256(totalTracked) * elapsed) / duration;
+        }
+
+        if (unlockedTotal <= rec.liquidityWithdrawn) revert NothingToClaim();
+        toRemove = uint128(unlockedTotal - rec.liquidityWithdrawn);
+        if (toRemove > activeLiq) toRemove = activeLiq;
+        if (toRemove == 0) revert NothingToClaim();
+
+        // Harvest accrued fees first so feeRecipients receive their exact share
+        _harvestLpFees(launchId);
+
+        rec.liquidityWithdrawn += toRemove;
+        address to = recipient == address(0) ? rec.creator : recipient;
+        PoolKey memory key = _poolKeys[launchId];
+
+        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        bytes[] memory unlockParams = new bytes[](2);
+        unlockParams[0] = abi.encode(rec.lpTokenId, uint256(toRemove), uint128(0), uint128(0), bytes(""));
+        unlockParams[1] = abi.encode(key.currency0, key.currency1, to);
+
+        POSITION_MANAGER.modifyLiquidities(abi.encode(actions, unlockParams), block.timestamp);
+        emit LinearLpWithdrawn(launchId, to, toRemove);
+    }
+
+    /// @notice Auto-harvests all remaining LP fees for co-recipients and releases the Uniswap v4
+    ///         Position NFT to `recipient` once the mandatory lock (and any linear LP vest) expires.
     function unlockLp(uint256 launchId, address recipient) external nonReentrant {
         LaunchRecord storage rec = _launches[launchId];
         if (rec.launchId == 0) revert InvalidTokenParams();
         if (msg.sender != rec.creator) revert OnlyCreator();
         if (rec.lpUnlocked) revert LpAlreadyUnlocked();
-        if (block.timestamp < rec.lpUnlockTime) {
-            revert LpStillLocked(rec.lpUnlockTime, uint64(block.timestamp));
+
+        uint64 effectiveUnlock = rec.lpVestingEnd > rec.lpUnlockTime ? rec.lpVestingEnd : rec.lpUnlockTime;
+        if (block.timestamp < effectiveUnlock) {
+            revert LpStillLocked(effectiveUnlock, uint64(block.timestamp));
         }
+
+        // Auto-harvest accrued fees so co-recipients cannot be bypassed at unlock
+        _harvestLpFees(launchId);
 
         rec.lpUnlocked = true;
         address to = recipient == address(0) ? rec.creator : recipient;
@@ -355,34 +513,99 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         emit LpUnlocked(launchId, to, rec.lpTokenId);
     }
 
-    /// @notice Claims unlocked tokens from the timestamp-linear team/treasury vesting schedule.
-    function claimVestedTokens(uint256 launchId) external nonReentrant returns (uint256 claimable) {
+    /// @notice Step 1 of two-step creator/Safe transfer (e.g., upgrading 1/1 wallet to 2/3 or 3/5 Safe).
+    function proposeCreator(uint256 launchId, address newCreator) external {
         LaunchRecord storage rec = _launches[launchId];
         if (rec.launchId == 0) revert InvalidTokenParams();
+        if (msg.sender != rec.creator) revert OnlyCreator();
+        if (newCreator == address(0)) revert InvalidCreatorAddress();
 
-        claimable = getClaimableVested(launchId);
-        if (claimable == 0) revert NothingToClaim();
-
-        rec.vestedClaimed += claimable;
-        IERC20(rec.launchToken).safeTransfer(rec.vestingBeneficiary, claimable);
-
-        emit VestedTokensClaimed(launchId, rec.vestingBeneficiary, claimable);
+        pendingCreator[launchId] = newCreator;
+        emit CreatorProposed(launchId, rec.creator, newCreator);
     }
 
-    /// @notice Returns currently claimable vested tokens for a launch.
-    function getClaimableVested(uint256 launchId) public view returns (uint256) {
+    /// @notice Step 2 of two-step creator/Safe transfer; must be signed by the proposed Safe/wallet.
+    function acceptCreator(uint256 launchId) external {
         LaunchRecord storage rec = _launches[launchId];
-        if (rec.vestedTotal == 0 || block.timestamp < rec.cliffEnd) return 0;
+        if (rec.launchId == 0) revert InvalidTokenParams();
+        if (msg.sender != pendingCreator[launchId]) revert OnlyPendingCreator();
 
-        uint256 unlocked = 0;
-        if (block.timestamp >= rec.vestingEnd) {
-            unlocked = rec.vestedTotal;
-        } else {
-            uint256 elapsed = block.timestamp - rec.cliffEnd;
-            uint256 duration = rec.vestingEnd - rec.cliffEnd;
-            unlocked = (rec.vestedTotal * elapsed) / duration;
+        address previous = rec.creator;
+        rec.creator = msg.sender;
+        delete pendingCreator[launchId];
+
+        emit CreatorAccepted(launchId, previous, msg.sender);
+    }
+
+    /// @notice Anchors an immutable audit, tokenomics, or legal disclosure hash onto the Provenance Seal.
+    function addDisclosureHash(uint256 launchId, bytes32 docHash, string calldata label) external {
+        LaunchRecord storage rec = _launches[launchId];
+        if (rec.launchId == 0) revert InvalidTokenParams();
+        if (msg.sender != rec.creator) revert OnlyCreator();
+        if (docHash == bytes32(0) || bytes(label).length == 0) revert InvalidTokenParams();
+
+        _disclosures[launchId].push(
+            DisclosureRecord({docHash: docHash, label: label, timestamp: uint64(block.timestamp)})
+        );
+        emit DisclosureAnchored(launchId, docHash, label);
+    }
+
+    /// @notice Claims unlocked tokens from a specific cap-table vesting tranche.
+    function claimVestedTokens(uint256 launchId, uint256 trancheIndex)
+        external
+        nonReentrant
+        returns (uint256 claimable)
+    {
+        LaunchRecord storage rec = _launches[launchId];
+        if (rec.launchId == 0) revert InvalidTokenParams();
+        VestingTranche[] storage tranches = _vestingTranches[launchId];
+        if (trancheIndex >= tranches.length) revert InvalidVestingConfig();
+
+        claimable = getClaimableVested(launchId, trancheIndex);
+        if (claimable == 0) revert NothingToClaim();
+
+        VestingTranche storage t = tranches[trancheIndex];
+        t.claimedAmount += claimable;
+        IERC20(rec.launchToken).safeTransfer(t.beneficiary, claimable);
+
+        emit VestedTokensClaimed(launchId, trancheIndex, t.beneficiary, claimable);
+    }
+
+    /// @notice Claims unlocked tokens across all cap-table vesting tranches for `msg.sender`.
+    function claimAllVestedTokens(uint256 launchId) external nonReentrant returns (uint256 totalClaimed) {
+        LaunchRecord storage rec = _launches[launchId];
+        if (rec.launchId == 0) revert InvalidTokenParams();
+        VestingTranche[] storage tranches = _vestingTranches[launchId];
+
+        for (uint256 i = 0; i < tranches.length; ++i) {
+            if (tranches[i].beneficiary != msg.sender) continue;
+            uint256 claimable = getClaimableVested(launchId, i);
+            if (claimable > 0) {
+                tranches[i].claimedAmount += claimable;
+                totalClaimed += claimable;
+                emit VestedTokensClaimed(launchId, i, msg.sender, claimable);
+            }
         }
-        return unlocked - rec.vestedClaimed;
+        if (totalClaimed == 0) revert NothingToClaim();
+        IERC20(rec.launchToken).safeTransfer(msg.sender, totalClaimed);
+    }
+
+    /// @notice Returns currently claimable vested tokens for a specific tranche.
+    function getClaimableVested(uint256 launchId, uint256 trancheIndex) public view returns (uint256) {
+        VestingTranche[] storage tranches = _vestingTranches[launchId];
+        if (trancheIndex >= tranches.length) return 0;
+        VestingTranche storage t = tranches[trancheIndex];
+        if (t.totalAmount == 0 || block.timestamp < t.cliffEnd) return 0;
+
+        uint256 unlocked;
+        if (block.timestamp >= t.vestingEnd) {
+            unlocked = t.totalAmount;
+        } else {
+            uint256 elapsed = block.timestamp - t.cliffEnd;
+            uint256 duration = t.vestingEnd - t.cliffEnd;
+            unlocked = (t.totalAmount * elapsed) / duration;
+        }
+        return unlocked - t.claimedAmount;
     }
 
     /// @notice Single-call on-chain Timberline Provenance Seal returning full launch verification data.
@@ -398,25 +621,29 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
             poolId: rec.poolId,
             lpTokenId: rec.lpTokenId,
             creator: rec.creator,
+            pendingCreator: pendingCreator[launchId],
             blueprint: rec.blueprint,
             isNativeBlueprint: rec.isNativeBlueprint,
             lpUnlocked: rec.lpUnlocked,
-            proLvrEnabled: rec.proLvrEnabled,
+            baseLpFeePips: rec.baseLpFeePips,
             snipePreset: rec.snipePreset,
             totalSupply: rec.totalSupply,
             poolTokenAmount: rec.poolTokenAmount,
             initialQuoteAmount: rec.initialQuoteAmount,
             pairedSupplyBps: pairedBps,
+            initialLiquidity: rec.initialLiquidity,
+            liquidityWithdrawn: rec.liquidityWithdrawn,
             lpUnlockTime: rec.lpUnlockTime,
-            vestingBeneficiary: rec.vestingBeneficiary,
+            lpVestingEnd: rec.lpVestingEnd,
             vestedTotal: rec.vestedTotal,
-            vestedClaimed: rec.vestedClaimed,
-            cliffEnd: rec.cliffEnd,
-            vestingEnd: rec.vestingEnd,
+            devBuyQuoteAmount: rec.devBuyQuoteAmount,
+            devBuyTokensBought: rec.devBuyTokensBought,
             hookAddress: address(HOOK),
             treasuryAddress: TREASURY,
             feeRecipients: _feeRecipients[launchId],
-            feeSharesBps: _feeSharesBps[launchId]
+            feeSharesBps: _feeSharesBps[launchId],
+            vestingTranches: _vestingTranches[launchId],
+            disclosures: _disclosures[launchId]
         });
     }
 
@@ -463,6 +690,7 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         }
 
         if (tokensBought < buy.minTokensOut) revert SlippageExceeded();
+        _pendingDevBuy.tokensBought = tokensBought;
         emit DevBuyExecuted(buy.key.toId(), buy.recipient, buy.quoteAmountIn, tokensBought);
         return bytes("");
     }
@@ -470,15 +698,24 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
     function _validateLaunchConfig(
         uint256 totalSupply,
         uint256 poolTokenAmount,
-        uint256 vestedAmount,
         PoolLaunchConfig calldata cfg
-    ) internal view {
+    ) internal view returns (uint256 totalVested) {
         if (poolTokenAmount == 0) revert InsufficientPoolAllocation();
         if (poolTokenAmount * BPS_DENOMINATOR < totalSupply * MIN_POOL_ALLOCATION_BPS) {
             revert InsufficientPoolAllocation();
         }
         if (cfg.tickLower >= cfg.tickUpper) revert InvalidTickRange();
         if (cfg.lpLockDuration < MIN_LP_LOCK_DURATION) revert InvalidLpLockDuration();
+        if (cfg.lpLockDuration == type(uint64).max && cfg.lpVestingDuration != 0) {
+            revert InvalidLpLockDuration();
+        }
+        if (
+            cfg.baseLpFeePips != HOOK.LP_FEE_30_BPS() &&
+            cfg.baseLpFeePips != HOOK.LP_FEE_50_BPS() &&
+            cfg.baseLpFeePips != HOOK.LP_FEE_100_BPS()
+        ) {
+            revert InvalidBaseLpFee();
+        }
 
         bool isNativeEth = (cfg.quoteToken == address(0));
         if (!isNativeEth && cfg.quoteToken != USDC) revert UnsupportedQuoteAsset();
@@ -486,20 +723,23 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         uint256 minSeed = isNativeEth ? MIN_ETH_SEED : MIN_USDC_SEED;
         if (cfg.quoteTokenAmount < minSeed) revert InsufficientSeedLiquidity();
 
-        uint256 requiredProFee = cfg.proLvrEnabled ? PRO_LVR_FEE : 0;
-        if (isNativeEth) {
-            if (msg.value < cfg.quoteTokenAmount + cfg.devBuyQuoteAmount + requiredProFee) {
-                revert InsufficientEthSent();
-            }
-        } else {
-            if (msg.value < requiredProFee) revert InsufficientEthSent();
+        if (isNativeEth && msg.value < cfg.quoteTokenAmount + cfg.devBuyQuoteAmount) {
+            revert InsufficientEthSent();
         }
 
-        if (vestedAmount > 0) {
-            if (cfg.vestingBeneficiary == address(0)) revert InvalidVestingConfig();
-            if (cfg.cliffDuration < MIN_CLIFF_DURATION || cfg.vestingDuration == 0) {
+        uint256 trancheCount = cfg.vestingTranches.length;
+        if (trancheCount > MAX_VESTING_TRANCHES) revert InvalidVestingConfig();
+        for (uint256 i = 0; i < trancheCount; ++i) {
+            VestingTrancheInput calldata t = cfg.vestingTranches[i];
+            if (
+                t.beneficiary == address(0) ||
+                t.amount == 0 ||
+                t.cliffDuration < MIN_CLIFF_DURATION ||
+                t.vestingDuration < MIN_VESTING_DURATION
+            ) {
                 revert InvalidVestingConfig();
             }
+            totalVested += t.amount;
         }
 
         uint256 recipientCount = cfg.feeRecipients.length;
@@ -521,13 +761,18 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
     function _executeLaunch(
         address launchToken,
         uint256 totalSupply,
-        uint256 vestedAmount,
+        uint256 totalVested,
         TimberlineTokenDeployer.Blueprint blueprint,
         bool isNativeBlueprint,
+        address creatorAddr,
         PoolLaunchConfig calldata cfg
     ) internal returns (uint256 launchId, PoolId poolId, uint256 lpTokenId) {
         bool isNativeEth = (cfg.quoteToken == address(0));
         bool quoteIsCurrency0 = uint160(cfg.quoteToken) < uint160(launchToken);
+
+        // Snapshot pre-existing contract balances so refunds only ever return caller's exact unused delta
+        uint256 ethBalStart = address(this).balance - msg.value;
+        uint256 usdcBalStart = isNativeEth ? 0 : IERC20(USDC).balanceOf(address(this));
 
         (Currency currency0, Currency currency1, uint256 amount0Max, uint256 amount1Max) = quoteIsCurrency0
             ? (Currency.wrap(cfg.quoteToken), Currency.wrap(launchToken), cfg.quoteTokenAmount, cfg.poolTokenAmount)
@@ -543,73 +788,6 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         poolId = poolKey.toId();
         lpTokenId = POSITION_MANAGER.nextTokenId();
 
-        // Effects: finalize all state records before any external contract call
-        launchId = ++launchCount;
-        uint64 lpUnlockTime = cfg.lpLockDuration == type(uint64).max
-            ? type(uint64).max
-            : uint64(block.timestamp) + cfg.lpLockDuration;
-        uint64 cliffEnd = vestedAmount > 0 ? uint64(block.timestamp) + cfg.cliffDuration : 0;
-        uint64 vestingEnd = vestedAmount > 0 ? cliffEnd + cfg.vestingDuration : 0;
-
-        _launches[launchId] = LaunchRecord({
-            launchId: launchId,
-            launchToken: launchToken,
-            quoteToken: cfg.quoteToken,
-            poolId: poolId,
-            lpTokenId: lpTokenId,
-            creator: msg.sender,
-            blueprint: blueprint,
-            isNativeBlueprint: isNativeBlueprint,
-            lpUnlocked: false,
-            proLvrEnabled: cfg.proLvrEnabled,
-            snipePreset: cfg.snipePreset,
-            totalSupply: totalSupply,
-            poolTokenAmount: cfg.poolTokenAmount,
-            initialQuoteAmount: cfg.quoteTokenAmount,
-            lpUnlockTime: lpUnlockTime,
-            vestingBeneficiary: vestedAmount > 0 ? cfg.vestingBeneficiary : address(0),
-            vestedTotal: vestedAmount,
-            vestedClaimed: 0,
-            cliffEnd: cliffEnd,
-            vestingEnd: vestingEnd
-        });
-
-        _poolKeys[launchId] = poolKey;
-        launchIdByToken[launchToken] = launchId;
-        launchIdByPool[poolId] = launchId;
-
-        if (cfg.feeRecipients.length == 0) {
-            _feeRecipients[launchId].push(msg.sender);
-            _feeSharesBps[launchId].push(uint16(BPS_DENOMINATOR));
-        } else {
-            for (uint256 i = 0; i < cfg.feeRecipients.length; ++i) {
-                _feeRecipients[launchId].push(cfg.feeRecipients[i]);
-                _feeSharesBps[launchId].push(cfg.feeSharesBps[i]);
-            }
-        }
-
-        // Interactions
-        if (cfg.proLvrEnabled) {
-            (bool feeOk,) = TREASURY.call{value: PRO_LVR_FEE}("");
-            if (!feeOk) revert EthTransferFailed();
-        }
-
-        if (!isNativeEth) {
-            uint256 totalUsdcIn = cfg.quoteTokenAmount + cfg.devBuyQuoteAmount;
-            uint256 usdcBefore = IERC20(USDC).balanceOf(address(this));
-            IERC20(USDC).safeTransferFrom(msg.sender, address(this), totalUsdcIn);
-            if (IERC20(USDC).balanceOf(address(this)) - usdcBefore != totalUsdcIn) {
-                revert FeeOnTransferUnsupported();
-            }
-        }
-
-        uint128 blockCap = cfg.maxBlockQuoteVolume > 0
-            ? cfg.maxBlockQuoteVolume
-            : uint128((cfg.quoteTokenAmount * DEFAULT_BLOCK_CAP_BPS) / BPS_DENOMINATOR);
-
-        HOOK.registerPoolConfig(poolKey, msg.sender, quoteIsCurrency0, cfg.snipePreset, cfg.proLvrEnabled, blockCap);
-        POOL_MANAGER.initialize(poolKey, cfg.sqrtPriceX96);
-
         uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
             cfg.sqrtPriceX96,
             TickMath.getSqrtPriceAtTick(cfg.tickLower),
@@ -618,6 +796,91 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
             amount1Max
         );
         if (liquidity == 0) revert ZeroLiquidityCalculated();
+
+        // Effects: record launch metadata and vesting tranches before external interactions
+        launchId = ++launchCount;
+        uint64 nowTs = uint64(block.timestamp);
+        uint64 lpUnlockTime = cfg.lpLockDuration == type(uint64).max
+            ? type(uint64).max
+            : nowTs + cfg.lpLockDuration;
+        uint64 lpVestingEnd = (lpUnlockTime != type(uint64).max && cfg.lpVestingDuration > 0)
+            ? lpUnlockTime + cfg.lpVestingDuration
+            : 0;
+
+        _launches[launchId] = LaunchRecord({
+            launchId: launchId,
+            launchToken: launchToken,
+            quoteToken: cfg.quoteToken,
+            poolId: poolId,
+            lpTokenId: lpTokenId,
+            creator: creatorAddr,
+            blueprint: blueprint,
+            isNativeBlueprint: isNativeBlueprint,
+            lpUnlocked: false,
+            baseLpFeePips: cfg.baseLpFeePips,
+            snipePreset: cfg.snipePreset,
+            totalSupply: totalSupply,
+            poolTokenAmount: cfg.poolTokenAmount,
+            initialQuoteAmount: cfg.quoteTokenAmount,
+            initialLiquidity: liquidity,
+            liquidityWithdrawn: 0,
+            lpUnlockTime: lpUnlockTime,
+            lpVestingEnd: lpVestingEnd,
+            vestedTotal: totalVested,
+            devBuyQuoteAmount: cfg.devBuyQuoteAmount,
+            devBuyTokensBought: 0
+        });
+
+        _poolKeys[launchId] = poolKey;
+        launchIdByToken[launchToken] = launchId;
+        launchIdByPool[poolId] = launchId;
+
+        if (cfg.feeRecipients.length == 0) {
+            _feeRecipients[launchId].push(creatorAddr);
+            _feeSharesBps[launchId].push(uint16(BPS_DENOMINATOR));
+        } else {
+            for (uint256 i = 0; i < cfg.feeRecipients.length; ++i) {
+                _feeRecipients[launchId].push(cfg.feeRecipients[i]);
+                _feeSharesBps[launchId].push(cfg.feeSharesBps[i]);
+            }
+        }
+
+        for (uint256 i = 0; i < cfg.vestingTranches.length; ++i) {
+            VestingTrancheInput calldata t = cfg.vestingTranches[i];
+            uint64 cliffEnd = nowTs + t.cliffDuration;
+            _vestingTranches[launchId].push(
+                VestingTranche({
+                    beneficiary: t.beneficiary,
+                    totalAmount: t.amount,
+                    claimedAmount: 0,
+                    cliffEnd: cliffEnd,
+                    vestingEnd: cliffEnd + t.vestingDuration
+                })
+            );
+        }
+
+        // Interactions
+        if (!isNativeEth) {
+            uint256 totalUsdcIn = cfg.quoteTokenAmount + cfg.devBuyQuoteAmount;
+            IERC20(USDC).safeTransferFrom(msg.sender, address(this), totalUsdcIn);
+            if (IERC20(USDC).balanceOf(address(this)) - usdcBalStart != totalUsdcIn) {
+                revert FeeOnTransferUnsupported();
+            }
+        }
+
+        uint128 blockCap = cfg.maxBlockQuoteVolume > 0
+            ? cfg.maxBlockQuoteVolume
+            : uint128((cfg.quoteTokenAmount * DEFAULT_BLOCK_CAP_BPS) / BPS_DENOMINATOR);
+
+        HOOK.registerPoolConfig(
+            poolKey,
+            creatorAddr,
+            quoteIsCurrency0,
+            cfg.baseLpFeePips,
+            cfg.snipePreset,
+            blockCap
+        );
+        POOL_MANAGER.initialize(poolKey, cfg.sqrtPriceX96);
 
         _approvePermit2(launchToken, cfg.poolTokenAmount);
         if (!isNativeEth) {
@@ -649,41 +912,69 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
             block.timestamp
         );
 
+        // Enforce >= 99% of both poolTokenAmount and quoteTokenAmount actually settled into PoolManager
+        uint256 remLaunchToken = IERC20(launchToken).balanceOf(address(this));
+        if (remLaunchToken < totalVested) revert PriceRangeMismatch();
+        uint256 unusedPoolTokens = remLaunchToken - totalVested;
+        uint256 actualPooledTokens = cfg.poolTokenAmount - unusedPoolTokens;
+        if (actualPooledTokens * BPS_DENOMINATOR < cfg.poolTokenAmount * 9_900) {
+            revert PriceRangeMismatch();
+        }
+
+        if (isNativeEth) {
+            uint256 ethAfterMint = address(this).balance;
+            uint256 ethSpentOnLp = (ethBalStart + msg.value) - ethAfterMint;
+            if (
+                ethSpentOnLp < MIN_ETH_SEED ||
+                ethSpentOnLp * BPS_DENOMINATOR < cfg.quoteTokenAmount * 9_900
+            ) {
+                revert PriceRangeMismatch();
+            }
+        } else {
+            uint256 usdcAfterMint = IERC20(USDC).balanceOf(address(this));
+            uint256 usdcSpentOnLp = (usdcBalStart + cfg.quoteTokenAmount + cfg.devBuyQuoteAmount) - usdcAfterMint;
+            if (
+                usdcSpentOnLp < MIN_USDC_SEED ||
+                usdcSpentOnLp * BPS_DENOMINATOR < cfg.quoteTokenAmount * 9_900
+            ) {
+                revert PriceRangeMismatch();
+            }
+        }
+
         if (cfg.devBuyQuoteAmount > 0) {
-            address buyRecipient = cfg.devBuyRecipient == address(0) ? msg.sender : cfg.devBuyRecipient;
+            address buyRecipient = cfg.devBuyRecipient == address(0) ? creatorAddr : cfg.devBuyRecipient;
             _pendingDevBuy = PendingDevBuy({
                 active: true,
                 key: poolKey,
                 quoteIsCurrency0: quoteIsCurrency0,
                 quoteAmountIn: cfg.devBuyQuoteAmount,
                 minTokensOut: cfg.minDevBuyTokensOut,
-                recipient: buyRecipient
+                recipient: buyRecipient,
+                tokensBought: 0
             });
             POOL_MANAGER.unlock(bytes(""));
+            _launches[launchId].devBuyTokensBought = _pendingDevBuy.tokensBought;
+            _pendingDevBuy.tokensBought = 0;
         }
 
-        uint256 remLaunchToken = IERC20(launchToken).balanceOf(address(this));
-        uint256 unusedPoolTokens = remLaunchToken - vestedAmount;
-        uint256 actualPooledTokens = cfg.poolTokenAmount - unusedPoolTokens;
-        if (actualPooledTokens * BPS_DENOMINATOR < cfg.poolTokenAmount * 9_900) {
-            revert PriceRangeMismatch();
-        }
+        // Return exact unused deposit deltas only (never pre-existing contract balances)
         if (unusedPoolTokens > 0) {
-            if (isNativeBlueprint && vestedAmount > 0) {
+            if (isNativeBlueprint && _vestingTranches[launchId].length > 0) {
+                _vestingTranches[launchId][0].totalAmount += unusedPoolTokens;
                 _launches[launchId].vestedTotal += unusedPoolTokens;
             } else {
                 IERC20(launchToken).safeTransfer(msg.sender, unusedPoolTokens);
             }
         }
         if (!isNativeEth) {
-            uint256 remUsdc = IERC20(USDC).balanceOf(address(this));
-            if (remUsdc > 0) {
-                IERC20(USDC).safeTransfer(msg.sender, remUsdc);
+            uint256 usdcNow = IERC20(USDC).balanceOf(address(this));
+            if (usdcNow > usdcBalStart) {
+                IERC20(USDC).safeTransfer(msg.sender, usdcNow - usdcBalStart);
             }
         }
-        uint256 excessEth = address(this).balance;
-        if (excessEth > 0) {
-            (bool refundOk,) = msg.sender.call{value: excessEth}("");
+        uint256 ethNow = address(this).balance;
+        if (ethNow > ethBalStart) {
+            (bool refundOk,) = msg.sender.call{value: ethNow - ethBalStart}("");
             if (!refundOk) revert EthTransferFailed();
         }
 
@@ -691,12 +982,34 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
             launchId,
             poolId,
             launchToken,
-            msg.sender,
+            creatorAddr,
             cfg.quoteToken,
             lpTokenId,
             isNativeBlueprint,
             lpUnlockTime
         );
+    }
+
+    function _harvestLpFees(uint256 launchId) internal returns (uint256 earned0, uint256 earned1) {
+        LaunchRecord storage rec = _launches[launchId];
+        PoolKey memory key = _poolKeys[launchId];
+        uint256 bal0Before = _currencyBalance(key.currency0);
+        uint256 bal1Before = _currencyBalance(key.currency1);
+
+        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        bytes[] memory unlockParams = new bytes[](2);
+        unlockParams[0] = abi.encode(rec.lpTokenId, uint256(0), uint128(0), uint128(0), bytes(""));
+        unlockParams[1] = abi.encode(key.currency0, key.currency1, address(this));
+
+        POSITION_MANAGER.modifyLiquidities(abi.encode(actions, unlockParams), block.timestamp);
+
+        earned0 = _currencyBalance(key.currency0) - bal0Before;
+        earned1 = _currencyBalance(key.currency1) - bal1Before;
+
+        if (earned0 > 0) _creditCurrency(launchId, key.currency0, earned0);
+        if (earned1 > 0) _creditCurrency(launchId, key.currency1, earned1);
+
+        emit LpFeesHarvested(launchId, earned0, earned1);
     }
 
     function _settleCurrency(Currency currency, uint256 amount) internal {
