@@ -174,13 +174,13 @@ contract TimberlineTokenDeployer {
     ) internal pure returns (bytes memory) {
         bytes memory args = abi.encode(name_, symbol_, totalSupply_, recipient_);
         if (blueprint == Blueprint.STANDARD) {
-            return abi.encodePacked(type(TimberlineStandardToken).creationCode, args);
+            return bytes.concat(type(TimberlineStandardToken).creationCode, args);
         } else if (blueprint == Blueprint.BURNABLE) {
-            return abi.encodePacked(type(TimberlineBurnableToken).creationCode, args);
+            return bytes.concat(type(TimberlineBurnableToken).creationCode, args);
         } else if (blueprint == Blueprint.GOVERNANCE) {
-            return abi.encodePacked(type(TimberlineGovernanceToken).creationCode, args);
+            return bytes.concat(type(TimberlineGovernanceToken).creationCode, args);
         } else {
-            return abi.encodePacked(type(TimberlineSuperchainToken).creationCode, args);
+            return bytes.concat(type(TimberlineSuperchainToken).creationCode, args);
         }
     }
 }

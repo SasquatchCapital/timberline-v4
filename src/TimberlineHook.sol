@@ -50,7 +50,7 @@ contract TimberlineHook is BaseHook {
 
     // Standard wall-clock LVR shield parameters
     uint256 public constant EMA_TAU_SECONDS = 60;               // 60s exponential EMA time constant
-    uint256 public constant EMA_SNAP_SECONDS = 240;             // 4x tau: full convergence after 4m idle
+    uint256 public constant EMA_SNAP_SECONDS = 120;             // 2x tau: Pade (1,1) full convergence
     uint256 public constant LVR_DEADBAND_BPS = 50;              // 0.50% spot price drift deadband
     uint256 public constant LVR_SLOPE_MULTIPLIER = 40;          // Scales drift bps into pips
 
@@ -252,12 +252,13 @@ contract TimberlineHook is BaseHook {
             if (dt >= EMA_SNAP_SECONDS) {
                 rt.emaSqrtPriceX96 = spotSqrtPriceX96;
             } else {
-                // Pade (1,1) approximation of (1 - e^(-dt/tau)) in bps
-                uint256 alphaBps = (2 * dt * BPS_DENOMINATOR) / (2 * EMA_TAU_SECONDS + dt);
-                if (alphaBps > BPS_DENOMINATOR) alphaBps = BPS_DENOMINATOR;
-                uint256 weightedNew = uint256(spotSqrtPriceX96) * alphaBps;
-                uint256 weightedOld = uint256(rt.emaSqrtPriceX96) * (BPS_DENOMINATOR - alphaBps);
-                rt.emaSqrtPriceX96 = uint160((weightedNew + weightedOld) / BPS_DENOMINATOR);
+                // Exact rational Pade (1,1) step without intermediate bps quantization
+                uint256 denom = 2 * EMA_TAU_SECONDS + dt;
+                uint256 numNew = 2 * dt;
+                uint256 numOld = 2 * EMA_TAU_SECONDS - dt;
+                rt.emaSqrtPriceX96 = uint160(
+                    (uint256(spotSqrtPriceX96) * numNew + uint256(rt.emaSqrtPriceX96) * numOld) / denom
+                );
             }
             rt.lastEmaTime = nowTs;
         }

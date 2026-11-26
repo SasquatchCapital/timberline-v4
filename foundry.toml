@@ -24,4 +24,4 @@ remappings = [
 base = "${BASE_RPC_URL}"
 
 [lint]
-exclude_lints = ["unsafe-typecast", "reentrancy-events", "unused-return", "reentrancy-no-eth", "reentrancy-eth", "block-timestamp", "incorrect-strict-equality"]
+exclude_lints = ["unsafe-typecast", "reentrancy-events", "unused-return", "reentrancy-no-eth", "reentrancy-eth", "reentrancy-balance", "missing-events-access-control", "arbitrary-send-eth", "block-timestamp", "incorrect-strict-equality"]

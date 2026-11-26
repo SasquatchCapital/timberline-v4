@@ -40,8 +40,12 @@ contract DeployTimberline is Script {
         address predictedLaunchpad = vm.computeCreateAddress(deployer, baseNonce + 2);
 
         uint160 flags = uint160(
-            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG |
-            Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+            Hooks.BEFORE_INITIALIZE_FLAG |
+            Hooks.BEFORE_ADD_LIQUIDITY_FLAG |
+            Hooks.BEFORE_SWAP_FLAG |
+            Hooks.AFTER_SWAP_FLAG |
+            Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG |
+            Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
 
         (address expectedHook, bytes32 salt) = HookMiner.find(
@@ -69,12 +73,12 @@ contract DeployTimberline is Script {
         require(address(tokenDeployer) == predictedTokenDeployer, "TOKEN_DEPLOYER_MISMATCH");
         require(address(launchpad) == predictedLaunchpad, "LAUNCHPAD_ADDR_MISMATCH");
 
-        console2.log("=== TIMBERLINE ECTS DEPLOYED ON", netName, "===");
+        console2.log("=== TIMBERLINE V2 ECTS DEPLOYED ON", netName, "===");
         console2.log("Deployer:               ", deployer);
         console2.log("Treasury:               ", treasury);
-        console2.log("TimberlineHook:         ", address(hook));
+        console2.log("TimberlineHook v2:      ", address(hook));
         console2.log("TimberlineTokenDeployer:", address(tokenDeployer));
-        console2.log("TimberlineLaunchpad:    ", address(launchpad));
+        console2.log("TimberlineLaunchpad v2: ", address(launchpad));
         console2.log("USDC Asset:             ", usdc);
     }
 }

@@ -1,70 +1,15 @@
-[
-  {
-    "type": "constructor",
-    "inputs": [
-      {
-        "name": "_launchpad",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "LAUNCHPAD",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "deployToken",
-    "inputs": [
-      {
-        "name": "blueprint",
-        "type": "uint8",
-        "internalType": "enum TimberlineTokenDeployer.Blueprint"
-      },
-      {
-        "name": "name_",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "symbol_",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "totalSupply_",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "recipient_",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "error",
-    "name": "OnlyLaunchpad",
-    "inputs": []
-  }
-]
+
+╭-------------+---------------------------------------------------------------------------------------------------------------------------+------------╮
+| Type        | Signature                                                                                                                 | Selector   |
++======================================================================================================================================================+
+| error       | OnlyLaunchpad()                                                                                                           | 0x236deb5b |
+|-------------+---------------------------------------------------------------------------------------------------------------------------+------------|
+| function    | LAUNCHPAD() view returns (address)                                                                                        | 0x51431d4f |
+|-------------+---------------------------------------------------------------------------------------------------------------------------+------------|
+| function    | computeTokenAddress(TimberlineTokenDeployer.Blueprint,string,string,uint256,address,bytes32) view returns (address)       | 0x4f558c31 |
+|-------------+---------------------------------------------------------------------------------------------------------------------------+------------|
+| function    | deployToken(TimberlineTokenDeployer.Blueprint,string,string,uint256,address,address,bytes32) nonpayable returns (address) | 0x341b1249 |
+|-------------+---------------------------------------------------------------------------------------------------------------------------+------------|
+| constructor | constructor(address) nonpayable                                                                                           |            |
+╰-------------+---------------------------------------------------------------------------------------------------------------------------+------------╯
+

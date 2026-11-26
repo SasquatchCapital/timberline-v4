@@ -10,6 +10,7 @@ import {LPFeeLibrary} from "v4-core/src/libraries/LPFeeLibrary.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
+import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "v4-periphery/src/libraries/Actions.sol";
 import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
@@ -36,6 +37,7 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
     using CurrencyLibrary for Currency;
     using SafeERC20 for IERC20;
     using TransientStateLibrary for IPoolManager;
+    using StateLibrary for IPoolManager;
 
     uint256 public constant MIN_ETH_SEED = 0.5 ether;
     uint256 public constant MIN_USDC_SEED = 1_000e6;
@@ -125,6 +127,8 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         bool isNativeBlueprint;
         bool lpUnlocked;
         uint24 baseLpFeePips;
+        int24 tickLower;
+        int24 tickUpper;
         TimberlineHook.SnipePreset snipePreset;
         uint256 totalSupply;
         uint256 poolTokenAmount;
@@ -374,7 +378,17 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         uint256 earned1 = _currencyBalance(key.currency1) - bal1Before;
         if (earned0 == 0 && earned1 == 0) revert NothingToClaim();
 
-        // Step 2: Re-add collected fees into the locked Position NFT
+        // Step 2: Compute exact liquidity for collected fee balances at current slot0 price
+        (uint160 sqrtPriceX96,,,) = POOL_MANAGER.getSlot0(rec.poolId);
+        uint128 liquidityToAdd = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceX96,
+            TickMath.getSqrtPriceAtTick(rec.tickLower),
+            TickMath.getSqrtPriceAtTick(rec.tickUpper),
+            earned0,
+            earned1
+        );
+        if (liquidityToAdd == 0) revert NothingToClaim();
+
         if (!key.currency0.isAddressZero() && earned0 > 0) {
             _approvePermit2(Currency.unwrap(key.currency0), earned0);
         }
@@ -386,11 +400,11 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         bool hasNativeEth = key.currency0.isAddressZero();
 
         bytes memory incActions = hasNativeEth
-            ? abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY_FROM_DELTAS), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP))
-            : abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY_FROM_DELTAS), uint8(Actions.SETTLE_PAIR));
+            ? abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP))
+            : abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
 
         bytes[] memory incParams = new bytes[](hasNativeEth ? 3 : 2);
-        incParams[0] = abi.encode(rec.lpTokenId, uint128(earned0), uint128(earned1), bytes(""));
+        incParams[0] = abi.encode(rec.lpTokenId, uint256(liquidityToAdd), uint128(earned0), uint128(earned1), bytes(""));
         incParams[1] = abi.encode(key.currency0, key.currency1);
         if (hasNativeEth) {
             incParams[2] = abi.encode(key.currency0, address(this));
@@ -729,6 +743,7 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
 
         uint256 trancheCount = cfg.vestingTranches.length;
         if (trancheCount > MAX_VESTING_TRANCHES) revert InvalidVestingConfig();
+        bool invalidTranche = false;
         for (uint256 i = 0; i < trancheCount; ++i) {
             VestingTrancheInput calldata t = cfg.vestingTranches[i];
             if (
@@ -737,10 +752,11 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
                 t.cliffDuration < MIN_CLIFF_DURATION ||
                 t.vestingDuration < MIN_VESTING_DURATION
             ) {
-                revert InvalidVestingConfig();
+                invalidTranche = true;
             }
             totalVested += t.amount;
         }
+        if (invalidTranche) revert InvalidVestingConfig();
 
         uint256 recipientCount = cfg.feeRecipients.length;
         if (recipientCount > MAX_FEE_RECIPIENTS || recipientCount != cfg.feeSharesBps.length) {
@@ -748,13 +764,14 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         }
         if (recipientCount > 0) {
             uint256 totalBps = 0;
+            bool invalidSplit = false;
             for (uint256 i = 0; i < recipientCount; ++i) {
                 if (cfg.feeRecipients[i] == address(0) || cfg.feeSharesBps[i] == 0) {
-                    revert InvalidFeeSplit();
+                    invalidSplit = true;
                 }
                 totalBps += cfg.feeSharesBps[i];
             }
-            if (totalBps != BPS_DENOMINATOR) revert InvalidFeeSplit();
+            if (invalidSplit || totalBps != BPS_DENOMINATOR) revert InvalidFeeSplit();
         }
     }
 
@@ -818,6 +835,8 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
             isNativeBlueprint: isNativeBlueprint,
             lpUnlocked: false,
             baseLpFeePips: cfg.baseLpFeePips,
+            tickLower: cfg.tickLower,
+            tickUpper: cfg.tickUpper,
             snipePreset: cfg.snipePreset,
             totalSupply: totalSupply,
             poolTokenAmount: cfg.poolTokenAmount,
@@ -924,19 +943,13 @@ contract TimberlineLaunchpad is ReentrancyGuard, IUnlockCallback {
         if (isNativeEth) {
             uint256 ethAfterMint = address(this).balance;
             uint256 ethSpentOnLp = (ethBalStart + msg.value) - ethAfterMint;
-            if (
-                ethSpentOnLp < MIN_ETH_SEED ||
-                ethSpentOnLp * BPS_DENOMINATOR < cfg.quoteTokenAmount * 9_900
-            ) {
+            if (ethSpentOnLp * BPS_DENOMINATOR < cfg.quoteTokenAmount * 9_900) {
                 revert PriceRangeMismatch();
             }
         } else {
             uint256 usdcAfterMint = IERC20(USDC).balanceOf(address(this));
             uint256 usdcSpentOnLp = (usdcBalStart + cfg.quoteTokenAmount + cfg.devBuyQuoteAmount) - usdcAfterMint;
-            if (
-                usdcSpentOnLp < MIN_USDC_SEED ||
-                usdcSpentOnLp * BPS_DENOMINATOR < cfg.quoteTokenAmount * 9_900
-            ) {
+            if (usdcSpentOnLp * BPS_DENOMINATOR < cfg.quoteTokenAmount * 9_900) {
                 revert PriceRangeMismatch();
             }
         }

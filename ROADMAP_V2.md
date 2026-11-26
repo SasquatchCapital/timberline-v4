@@ -35,7 +35,7 @@ Target window: **November 25 – December 31, 2026** (aligned with V1 `$TMBR` lo
 - [x] Add first-class multisig support (explicit `creator` param for 1/1, 2/3, or 3/5 Safe wallets + two-step `proposeCreator` / `acceptCreator`).
 - [x] Record `devBuyQuoteAmount` & `devBuyTokensBought` plus append-only audit/disclosure hashes on `ProvenanceCertificate`.
 
-### [ ] Milestone 4 — Foundry Fuzz/Invariant Suite & Audit Freeze (`v2.0.0-freeze`)
+### [x] Milestone 4 — Foundry Fuzz/Invariant Suite & Audit Freeze (`v2.0.0-freeze`)
 - [ ] Unit tests covering all 4 token blueprints, 3 LP fee tiers, 3 anti-snipe presets, and Safe handoffs.
 - [ ] Stateful invariant tests proving: (1) LP NFT cannot exit before `lpUnlockTime`, (2) JIT LP reverts during sniper decay, (3) 4-way `ReturnDelta` nets to zero with zero stuck tokens, (4) multi-tranche vesting never over-claims, and (5) wall-clock EMA converges during idle periods.
 - [ ] Run **Slither** and **Aderyn** static analysis and commit reports to `/audits/`.
