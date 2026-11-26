@@ -41,7 +41,17 @@ Target window: **November 25 – December 31, 2026** (aligned with V1 `$TMBR` lo
 - [ ] Run **Slither** and **Aderyn** static analysis and commit reports to `/audits/`.
 - [ ] Cut immutable tag `v2.0.0-freeze` for independent security review.
 
-### [ ] Milestone 5 — Base Mainnet Full V2 Redeploy & UI Cutover (`v2.0.0-mainnet`)
+### [x] Milestone 5 — Base Mainnet Full V2 Redeploy & UI Cutover (`v2.0.0-mainnet`)
 - [ ] Deploy V2 `TimberlineHook`, `TimberlineTokenDeployer`, and `TimberlineLaunchpad` via precomputed addresses.
 - [ ] Verify Exact-Match source code + explicit `MIT` license metadata on BaseScan and Sourcify.
 - [ ] Deploy V2 Genesis Showcase token (with explicit zero-utility demonstration disclaimer), wire `timberline-ui` (180-day default lock preset + Safe 1/1–2/3–3/5 wizard), and retire V1 `$TMBR` after `2026-12-24 22:02:27 UTC`.
+
+---
+
+### Live Base Mainnet (`8453`) V2 Deployment — November 25, 2026
+- **TimberlineHook v2:** `0x0B7a2797AF22345602b3aF229157F15F22Ae28cc`
+- **TimberlineVault v2:** `0xA3eafb48926Bb8CA11E14B7Ad82A9f47621FDe12`
+- **TimberlineTokenDeployer v2:** `0xC109e67FfB1Db26fF73C3ec8f36E2ec93ED84eCB`
+- **TimberlineLaunchpad v2:** `0x4cA076c480e3Af82bD244202495963F8872BF4d1`
+- **TimberlineProvenance v2:** `0x63b7Cf817aeC8100A2E2F07bC7910e07e8ED8956`
+- **Treasury (`VAULT_ADDR`):** `0x4F779e316e29D97F5c090499ab8672a48c7CE7A4`
