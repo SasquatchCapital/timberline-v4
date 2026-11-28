@@ -19,5 +19,12 @@ Timberline provides audited, zero-admin token blueprints, deterministic `CREATE2
 * **Genesis Showcase Token (`$TMBR` v1):** `0x8dc39de1EA51E50AadD1B6179143c9119681A817` (Uniswap v4 Position NFT `#3251586`)
 * **Protocol Treasury:** `0x4F779e316e29D97F5c090499ab8672a48c7CE7A4`
 
-### V2 Production Suite (`v2.0.0` — In Development)
-* Tracked in [`ROADMAP_V2.md`](./ROADMAP_V2.md). Contract addresses will be published upon `v2.0.0-freeze` audit completion and BaseScan / Sourcify Exact-Match verification.
+### V2 Production Suite (`v2.0.0` — Live on Base Mainnet `8453`)
+
+* **Status:** Active & Verified (5/5 contracts Exact-Match verified on **BaseScan** & **Sourcify**).
+* **`TimberlineLaunchpad`:** [`0x4cA076c480e3Af82bD244202495963F8872BF4d1`](https://basescan.org/address/0x4cA076c480e3Af82bD244202495963F8872BF4d1#code)
+* **`TimberlineTokenDeployer`:** [`0xC109e67FfB1Db26fF73C3ec8f36E2ec93ED84eCB`](https://basescan.org/address/0xC109e67FfB1Db26fF73C3ec8f36E2ec93ED84eCB#code)
+* **`TimberlineVault`:** [`0xA3eafb48926Bb8CA11E14B7Ad82A9f47621FDe12`](https://basescan.org/address/0xA3eafb48926Bb8CA11E14B7Ad82A9f47621FDe12#code)
+* **`TimberlineHook`:** [`0x0B7a2797AF22345602b3aF229157F15F22Ae28cc`](https://basescan.org/address/0x0B7a2797AF22345602b3aF229157F15F22Ae28cc#code)
+* **`TimberlineProvenance`:** [`0x63b7Cf817aeC8100A2E2F07bC7910e07e8ED8956`](https://basescan.org/address/0x63b7Cf817aeC8100A2E2F07bC7910e07e8ED8956#code)
+* **Protocol Treasury:** [`0x4F779e316e29D97F5c090499ab8672a48c7CE7A4`](https://basescan.org/address/0x4F779e316e29D97F5c090499ab8672a48c7CE7A4)
